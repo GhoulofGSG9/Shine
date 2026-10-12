@@ -23,7 +23,7 @@ local TableSort = table.sort
 local tostring = tostring
 
 local Plugin, PluginName = ...
-Plugin.Version = "1.6"
+Plugin.Version = "1.7"
 Plugin.PrintName = "Base Commands"
 
 Plugin.HasConfig = true
@@ -92,6 +92,24 @@ Plugin.ConfigMigrationSteps = {
 				SendRate = GetAndRemoveRate( "SendRate" ),
 				TickRate = GetAndRemoveRate( "TickRate" )
 			}
+		end
+	},
+	{
+		VersionTo = "1.7",
+		Apply = function( Config )
+			local Rates = Config.Rates
+			if not IsType( Rates, "table" ) then return end
+
+			-- A config holding exactly the old stock rates never chose them.
+			if Rates.TickRate == 30 and Rates.SendRate == 20 and Rates.MoveRate == 26 and Rates.Interp == 100
+			and Rates.BWLimit == 50 then
+				local Defaults = Plugin.DefaultConfig.Rates
+				Rates.TickRate = Defaults.TickRate
+				Rates.SendRate = Defaults.SendRate
+				Rates.MoveRate = Defaults.MoveRate
+				Rates.Interp = Defaults.Interp
+				Rates.BWLimit = Defaults.BWLimit
+			end
 		end
 	}
 }

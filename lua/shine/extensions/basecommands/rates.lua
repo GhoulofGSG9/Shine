@@ -13,11 +13,11 @@ RatesModule.DefaultConfig = {
 	Rates = {
 		-- Whether to enforce these rate settings or leave the defaults as-is.
 		ApplyRates = true,
-		BWLimit = 50,
-		Interp = 100,
-		MoveRate = 26,
-		SendRate = 20,
-		TickRate = 30
+		BWLimit = 100,
+		Interp = 70,
+		MoveRate = 60,
+		SendRate = 30,
+		TickRate = 60
 	}
 }
 
@@ -26,7 +26,7 @@ local Rates = {
 		Key = "MoveRate",
 		Min = 5,
 		Integer = true,
-		Default = 26,
+		Default = 60,
 		Command = "mr %s"
 	},
 	{
@@ -46,7 +46,7 @@ local Rates = {
 	{
 		Key = "Interp",
 		Min = 0,
-		Default = 100,
+		Default = 70,
 		Command = function( Value ) return StringFormat( "interp %s", Value * 0.001 ) end
 	},
 	{
@@ -54,8 +54,7 @@ local Rates = {
 		Min = 5,
 		Transformer = function( Value ) return Value * 1024 end,
 		Default = function() return Server.GetBwLimit() / 1024 end,
-		Command = "bwlimit %s",
-		WarnIfBelow = 50
+		Command = "bwlimit %s"
 	}
 }
 
@@ -141,10 +140,13 @@ function RatesModule:CheckRateValues()
 
 			Shared.ConsoleCommand( Command )
 		end
+	end
 
-		if Rate.WarnIfBelow and ConfigValue < Rate.WarnIfBelow then
-			Notify( StringFormat( "WARNING: %s is below the default of %s", Rate.Key, Rate.WarnIfBelow ) )
-		end
+	-- A snapshot larger than BWLimit / SendRate is held back until it clears, which players see as warping.
+	local MinBWLimit = 2 * self.Config.Rates.SendRate
+	if self.Config.Rates.BWLimit < MinBWLimit then
+		Notify( StringFormat( "WARNING: BWLimit %s KB/s leaves less than 2 KB per snapshot at send rate %s. Use at least %s.",
+			self.Config.Rates.BWLimit, self.Config.Rates.SendRate, MinBWLimit ) )
 	end
 end
 
