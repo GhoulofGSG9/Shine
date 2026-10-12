@@ -14,7 +14,8 @@ RatesModule.DefaultConfig = {
 		-- Whether to enforce these rate settings or leave the defaults as-is.
 		ApplyRates = true,
 		BWLimit = 100,
-		Interp = 70,
+		-- 0 lets the engine size interp from the send and move rates.
+		Interp = 0,
 		MoveRate = 60,
 		SendRate = 30,
 		TickRate = 60
@@ -46,8 +47,12 @@ local Rates = {
 	{
 		Key = "Interp",
 		Min = 0,
-		Default = 70,
-		Command = function( Value ) return StringFormat( "interp %s", Value * 0.001 ) end
+		Default = 0,
+		-- Engines without interp auto fail to parse it and keep their current interp.
+		Command = function( Value )
+			if Value == 0 then return "interp auto" end
+			return StringFormat( "interp %s", Value * 0.001 )
+		end
 	},
 	{
 		Key = "BWLimit",
@@ -103,7 +108,7 @@ Validator:AddRule( {
 	Matches = function( self, Config )
 		local MinInterp = 2 / Config.Rates.SendRate * 1000
 
-		if Config.Rates.Interp < MinInterp then
+		if Config.Rates.Interp ~= 0 and Config.Rates.Interp < MinInterp then
 			Config.Rates.Interp = MinInterp
 			Notify( StringFormat( "Interp cannot be less than %.2fms, clamping...",
 				MinInterp ) )

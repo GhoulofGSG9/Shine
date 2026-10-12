@@ -1701,7 +1701,7 @@ end
 function Plugin:CreatePerformanceCommands()
 	local function Interp( Client, NewInterp )
 		local MinInterp = 2 / self.Config.Rates.SendRate * 1000
-		if NewInterp < MinInterp then
+		if NewInterp ~= 0 and NewInterp < MinInterp then
 			NotifyError( Client, "ERROR_INTERP_CONSTRAINT", {
 				Rate = MinInterp
 			}, "Interp is constrained by send rate to be %.2fms minimum.", true, MinInterp )
@@ -1710,16 +1710,22 @@ function Plugin:CreatePerformanceCommands()
 
 		self.Config.Rates.Interp = NewInterp
 
-		Shared.ConsoleCommand( StringFormat( "interp %s", NewInterp * 0.001 ) )
+		if NewInterp == 0 then
+			Shared.ConsoleCommand( "interp auto" )
 
-		Shine:AdminPrint( Client, "%s set interp to %.2fms", true,
-			Shine.GetClientInfo( Client ),
-			NewInterp )
+			Shine:AdminPrint( Client, "%s set interp to auto", true, Shine.GetClientInfo( Client ) )
+		else
+			Shared.ConsoleCommand( StringFormat( "interp %s", NewInterp * 0.001 ) )
+
+			Shine:AdminPrint( Client, "%s set interp to %.2fms", true,
+				Shine.GetClientInfo( Client ),
+				NewInterp )
+		end
 
 		self:SaveConfig( true )
 	end
 	local InterpCommand = self:BindCommand( "sh_interp", "interp", Interp )
-	InterpCommand:AddParam{ Type = "number", Min = 0, Help = "time in ms" }
+	InterpCommand:AddParam{ Type = "number", Min = 0, Help = "time in ms, 0 for auto" }
 	InterpCommand:Help( "Sets the interpolation time and saves it." )
 
 	local function AddAdditionalInfo( Command, ConfigKey, Units )
@@ -1728,7 +1734,10 @@ function Plugin:CreatePerformanceCommands()
 		end
 	end
 
-	AddAdditionalInfo( InterpCommand, "Interp", "ms" )
+	InterpCommand.GetAdditionalInfo = function()
+		local Value = self.Config.Rates.Interp
+		return Value == 0 and " - Current value: auto" or StringFormat( " - Current value: %ims", Value )
+	end
 
 	local function TickRate( Client, NewRate )
 		if NewRate < self.Config.Rates.MoveRate then
