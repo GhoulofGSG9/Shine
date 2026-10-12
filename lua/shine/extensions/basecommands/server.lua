@@ -23,7 +23,7 @@ local TableSort = table.sort
 local tostring = tostring
 
 local Plugin, PluginName = ...
-Plugin.Version = "1.7"
+Plugin.Version = "1.6"
 Plugin.PrintName = "Base Commands"
 
 Plugin.HasConfig = true
@@ -92,24 +92,6 @@ Plugin.ConfigMigrationSteps = {
 				SendRate = GetAndRemoveRate( "SendRate" ),
 				TickRate = GetAndRemoveRate( "TickRate" )
 			}
-		end
-	},
-	{
-		VersionTo = "1.7",
-		Apply = function( Config )
-			local Rates = Config.Rates
-			if not IsType( Rates, "table" ) then return end
-
-			-- A config holding exactly the old stock rates never chose them.
-			if Rates.TickRate == 30 and Rates.SendRate == 20 and Rates.MoveRate == 26 and Rates.Interp == 100
-			and Rates.BWLimit == 50 then
-				local Defaults = Plugin.DefaultConfig.Rates
-				Rates.TickRate = Defaults.TickRate
-				Rates.SendRate = Defaults.SendRate
-				Rates.MoveRate = Defaults.MoveRate
-				Rates.Interp = Defaults.Interp
-				Rates.BWLimit = Defaults.BWLimit
-			end
 		end
 	}
 }
@@ -1701,7 +1683,8 @@ end
 function Plugin:CreatePerformanceCommands()
 	local function Interp( Client, NewInterp )
 		local MinInterp = 2 / self.Config.Rates.SendRate * 1000
-		if NewInterp ~= 0 and NewInterp < MinInterp then
+		local IsAuto = NewInterp == 0 and self:IsInterpAutoSupported()
+		if not IsAuto and NewInterp < MinInterp then
 			NotifyError( Client, "ERROR_INTERP_CONSTRAINT", {
 				Rate = MinInterp
 			}, "Interp is constrained by send rate to be %.2fms minimum.", true, MinInterp )
@@ -1709,8 +1692,9 @@ function Plugin:CreatePerformanceCommands()
 		end
 
 		self.Config.Rates.Interp = NewInterp
+		self.Config.Rates.KeepSavedRates = true
 
-		if NewInterp == 0 then
+		if IsAuto then
 			Shared.ConsoleCommand( "interp auto" )
 
 			Shine:AdminPrint( Client, "%s set interp to auto", true, Shine.GetClientInfo( Client ) )
@@ -1748,6 +1732,7 @@ function Plugin:CreatePerformanceCommands()
 		end
 
 		self.Config.Rates.TickRate = NewRate
+		self.Config.Rates.KeepSavedRates = true
 
 		Shared.ConsoleCommand( StringFormat( "tickrate %s", NewRate ) )
 
@@ -1765,6 +1750,7 @@ function Plugin:CreatePerformanceCommands()
 
 	local function BWLimit( Client, NewLimit )
 		self.Config.Rates.BWLimit = NewLimit
+		self.Config.Rates.KeepSavedRates = true
 
 		Shared.ConsoleCommand( StringFormat( "bwlimit %s", NewLimit * 1024 ) )
 
@@ -1796,6 +1782,7 @@ function Plugin:CreatePerformanceCommands()
 		end
 
 		self.Config.Rates.SendRate = NewRate
+		self.Config.Rates.KeepSavedRates = true
 
 		Shared.ConsoleCommand( StringFormat( "sendrate %s", NewRate ) )
 
@@ -1827,6 +1814,7 @@ function Plugin:CreatePerformanceCommands()
 		end
 
 		self.Config.Rates.MoveRate = NewRate
+		self.Config.Rates.KeepSavedRates = true
 
 		Shared.ConsoleCommand( StringFormat( "mr %s", NewRate ) )
 
