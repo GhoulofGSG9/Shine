@@ -4,24 +4,29 @@
 
 local Shine = Shine
 
-local Plugin = {}
-Plugin.Version = "1.2"
+local IsType = Shine.IsType
+local tonumber = tonumber
+
+local Plugin = Shine.Plugin( ... )
+Plugin.Version = "1.3"
 
 Plugin.HasConfig = true
 Plugin.ConfigName = "MotD.json"
+Plugin.PlayerMemoryFilePath = "config://shine/temp/motd_history.json"
 
-Plugin.TEXT_MODE = 1
-Plugin.HTML_MODE = 2
-Plugin.HYBRID_MODE = 3
+Plugin.MessageDisplayMode = table.AsEnum{
+	"TEXT_ONLY", "WEBPAGE_ONLY", "TEXT_ON_CONNECT"
+}
 
 Plugin.DefaultConfig = {
-	Mode = Plugin.TEXT_MODE,
-	URL = "http://www.unknownworlds.com/ns2/",
+	Mode = Plugin.MessageDisplayMode.TEXT_ONLY,
+	URL = "https://www.unknownworlds.com/ns2/",
 	MessageText = {
 		"Welcome to my awesome server!",
 		"Admins can be reached @ mywebsite.com",
 		"Have a pleasant stay!"
 	},
+	MessageColour = { 255, 255, 255 },
 	Accepted = {},
 	Delay = 5
 }
@@ -29,7 +34,39 @@ Plugin.DefaultConfig = {
 Plugin.CheckConfig = true
 Plugin.CheckConfigTypes = true
 
+Plugin.PrintName = "MOTD"
+Plugin.NotifyPrefixColour = {
+	0, 100, 255
+}
+
+Plugin.ConfigMigrationSteps = {
+	{
+		VersionTo = "1.3",
+		Apply = Shine.Migrator()
+			:UseEnum( "Mode", Plugin.MessageDisplayMode )
+	}
+}
+
+do
+	local Validator = Shine.Validator()
+
+	Validator:AddFieldRule( "Mode", Validator.InEnum( Plugin.MessageDisplayMode, Plugin.DefaultConfig.Mode ) )
+	Validator:AddFieldRule( "MessageColour", Validator.Each(
+		Validator.IsType( "number", 255 )
+	) )
+	Validator:AddFieldRule( "MessageColour", Validator.Each(
+		Validator.Clamp( 0, 255 )
+	) )
+	Validator:AddFieldRule( "Delay", Validator.Min( 0 ) )
+
+	Plugin.ConfigValidator = Validator
+end
+
+Shine.LoadPluginModule( "player_memory.lua", Plugin )
+
 function Plugin:Initialise()
+	self:BroadcastModuleEvent( "Initialise" )
+
 	self:CreateCommands()
 
 	self.Enabled = true
@@ -37,43 +74,74 @@ function Plugin:Initialise()
 	return true
 end
 
-function Plugin:Notify( Player, String, Format, ... )
-	Shine:NotifyDualColour( Player, 0, 100, 255, "[MOTD]", 255, 255, 255, String, Format, ... )
+function Plugin:GetRememberedPlayerIDs()
+	-- Data has historically been stored in a sub-table.
+	if not IsType( self.RememberedPlayers.Displayed, "table" ) then
+		self.RememberedPlayers.Displayed = {}
+	end
+	return self.RememberedPlayers.Displayed
+end
+
+function Plugin:MapChange()
+	self:BroadcastModuleEvent( "MapChange" )
 end
 
 function Plugin:ShowMotD( Client, OnConnect )
-	if not Shine:IsValidClient( Client ) then return end
+	if not Shine:IsValidClient( Client ) then return false end
 
 	local Mode = self.Config.Mode
 
-	if Mode == self.TEXT_MODE or ( Mode == self.HYBRID_MODE and OnConnect ) then
+	if Mode == self.MessageDisplayMode.TEXT_ONLY
+	or ( Mode == self.MessageDisplayMode.TEXT_ON_CONNECT and OnConnect ) then
 		local Messages = self.Config.MessageText
+		local Colour = self.Config.MessageColour
 
-		for i = 1, #Messages do
-			Shine:NotifyColour( Client, 255, 255, 255, Messages[ i ] )
+		local function GetColourValue( Index )
+			return tonumber( Colour[ Index ] ) or 255
 		end
 
-		return
+		for i = 1, #Messages do
+			Shine:NotifyColour(
+				Client,
+				GetColourValue( 1 ), GetColourValue( 2 ), GetColourValue( 3 ),
+				Messages[ i ]
+			)
+		end
+
+		return true
 	end
 
 	Shine.SendNetworkMessage( Client, "Shine_Web", {
 		URL = self.Config.URL,
-		Title = "Message of the day"
+		Title = "MESSAGE_OF_THE_DAY"
 	}, true )
+
+	return true
 end
 
 function Plugin:ClientConfirmConnect( Client )
 	if Client:GetIsVirtual() then return end
 
-	local ID = Client:GetUserId()
-
-	if self.Config.Accepted[ tostring( ID ) ] then return end
+	local ID = tostring( Client:GetUserId() )
+	if self.Config.Accepted[ ID ] or self:IsPlayerIDRemembered( ID ) then
+		return
+	end
 
 	if Shine:HasAccess( Client, "sh_showmotd" ) then return end
 
 	self:SimpleTimer( self.Config.Delay, function()
-		self:ShowMotD( Client, true )
+		if self:ShowMotD( Client, true ) then
+			-- Remember that the client has seen the MOTD already and don't display it again until they disconnect.
+			-- This stops the message popping up after every map change.
+			self:RememberPlayerID( ID )
+		end
 	end )
+end
+
+function Plugin:ClientDisconnect( Client )
+	if Client:GetIsVirtual() then return end
+
+	self:ForgetPlayerID( tostring( Client:GetUserId() ) )
 end
 
 function Plugin:CreateCommands()
@@ -90,18 +158,17 @@ function Plugin:CreateCommands()
 	local function AcceptMotD( Client )
 		if not Client then return end
 
-		local ID = Client:GetUserId()
+		local ID = tostring( Client:GetUserId() )
 
-		if self.Config.Accepted[ tostring( ID ) ] then
-			self:Notify( Client, "You have already accepted the message of the day." )
-
+		if self.Config.Accepted[ ID ] then
+			self:NotifyTranslated( Client, "ALREADY_ACCEPTED_MOTD" )
 			return
 		end
 
-		self.Config.Accepted[ tostring( ID ) ] = true
+		self.Config.Accepted[ ID ] = true
 		self:SaveConfig( true )
 
-		self:Notify( Client, "Thank you for accepting the message of the day." )
+		self:NotifyTranslated( Client, "ACCEPTED_MOTD_RESPONSE" )
 	end
 	local AcceptMotDCommand = self:BindCommand( "sh_acceptmotd", "acceptmotd", AcceptMotD, true )
 	AcceptMotDCommand:Help( "Accepts the message of the day so you no longer see it on connect." )
@@ -111,7 +178,7 @@ function Plugin:CreateCommands()
 	end
 	local ShowMotDCommand = self:BindCommand( "sh_showmotd", "showmotd", ShowMotD )
 	ShowMotDCommand:AddParam{ Type = "client" }
-	ShowMotDCommand:Help( "<player> Shows the message of the day to the given player." )
+	ShowMotDCommand:Help( "Shows the message of the day to the given player." )
 end
 
-Shine:RegisterExtension( "motd", Plugin )
+return Plugin

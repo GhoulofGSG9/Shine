@@ -2,47 +2,32 @@
 	Shine client side startup.
 ]]
 
-Shine = {}
-
-local include = Script.Load
 local StringFormat = string.format
 
 local Scripts = {
-	"lib/debug.lua",
-	"lib/string.lua",
-	"lib/utf8.lua",
-	"lib/table.lua",
-	"lib/class.lua",
-	"lib/math.lua",
-	"lib/map.lua",
-	"lib/game.lua",
-	"core/shared/hook.lua",
+	"lib/locale.lua",
+	"lib/timer.lua",
 	"core/shared/misc.lua",
 	"core/shared/logging.lua",
+	"core/shared/config.lua",
 	"lib/gui.lua",
 	"lib/datatables.lua",
-	"lib/timer.lua",
 	"lib/query.lua",
 	"lib/player.lua",
 	"core/shared/commands.lua",
 	"core/client/commands.lua",
-	"core/shared/config.lua",
 	"core/client/config.lua",
 	"core/shared/votemenu.lua",
 	"core/client/votemenu.lua",
 	"core/shared/adminmenu.lua",
 	"core/client/adminmenu.lua",
+	"core/shared/system_notifications.lua",
 	"core/shared/extensions.lua",
 	"core/shared/chat.lua",
 	"core/shared/webpage.lua",
 	"lib/screentext/sh_screentext.lua",
-	"lib/screentext/cl_screentext.lua"
-}
-
-local OnLoadedFuncs = {
-	[ "lib/game.lua" ] = function()
-		Shine.IsNS2Combat = Shine.GetGamemode() == "combat"
-	end
+	"lib/screentext/cl_screentext.lua",
+	"core/shared/autocomplete.lua"
 }
 
 local StartupMessages = {}
@@ -56,10 +41,9 @@ function Shine.AddStartupMessage( Message, Format, ... )
 	StartupMessages[ #StartupMessages + 1 ] = Message
 end
 
-for i = 1, #Scripts do
-	include( "lua/shine/"..Scripts[ i ] )
-
-	if OnLoadedFuncs[ Scripts[ i ] ] then
-		OnLoadedFuncs[ Scripts[ i ] ]()
+Shine.LoadScripts( Scripts, {
+	[ "lib/locale.lua" ] = function()
+		Shine.Locale:RegisterSource( "Core", "locale/shine/core" )
 	end
-end
+} )
+Shine.Locale:OnLoaded()

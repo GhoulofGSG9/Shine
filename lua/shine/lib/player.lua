@@ -2,6 +2,9 @@
 	Shine player functions.
 ]]
 
+local Shine = Shine
+local Hook = Shine.Hook
+
 local TeamNames = {
 	ns2 = {
 		{ "Marines", "marines", "marine team" },
@@ -40,45 +43,156 @@ function Shine:GetTeamName( Team, Capitals, Singular )
 	return Names[ Team ][ 2 ]
 end
 
-if Client then return end
+do
+	local PlayingTeams = { true, true }
+
+	function Shine.IsPlayingTeam( TeamNumber )
+		return PlayingTeams[ TeamNumber ] or false
+	end
+end
+
+if Client then
+	local Indexes = {
+		ByName = {},
+		ByClientID = {}
+	}
+
+	--[[
+		Returns the scoreboard entry for the player with the given name.
+
+		This accounts for possible client-side name changes (such as an AFK prefix), returning the same entry for the
+		original player name and the altered name.
+	]]
+	function Shine.GetScoreboardEntryByName( Name )
+		local Entry = Scoreboard_GetPlayerRecordByName and Scoreboard_GetPlayerRecordByName( Name )
+		if Entry then
+			return Entry
+		end
+
+		return Indexes.ByName[ Name ]
+	end
+
+	function Shine.GetScoreboardEntryByClientID( ClientID )
+		local Entry = Scoreboard_GetPlayerRecord and Scoreboard_GetPlayerRecord( ClientID )
+		if Entry then
+			return Entry
+		end
+
+		return Indexes.ByClientID[ ClientID ]
+	end
+
+	Hook.CallAfterFileLoad( "lua/Scoreboard.lua", function()
+		local ErrorHandler = Shine.BuildErrorHandler( "Scoreboard update error" )
+		local TableEmpty = table.Empty
+		local xpcall = xpcall
+
+		Hook.SetupGlobalHook( "Scoreboard_ReloadPlayerData", "PostScoreboardReload", "PassivePost" )
+
+		local function UpdateScoreboardEntries()
+			TableEmpty( Indexes.ByName )
+			TableEmpty( Indexes.ByClientID )
+
+			local EntityList = Shared.GetEntitiesWithClassname( "PlayerInfoEntity" )
+			for _, Entity in ientitylist( EntityList ) do
+				local Entry = Scoreboard_GetPlayerRecord( Entity.clientId )
+				if Entry and Entry.Name then
+					Indexes.ByName[ Entry.Name ] = Entry
+
+					if Entry.ClientIndex then
+						Indexes.ByClientID[ Entry.ClientIndex ] = Entry
+					end
+
+					Hook.Call( "OnScoreboardEntryReload", Entry, Entity )
+
+					-- Update in case the name was changed elsewhere (assume the change is unique).
+					Indexes.ByName[ Entry.Name ] = Entry
+				end
+			end
+		end
+
+		local CALLING = false
+		Hook.Add( "PostScoreboardReload", "IndexPlayerEntries", function()
+			if CALLING then return end
+
+			-- Just in case we somehow see a PlayerInfoEntity that has a client ID that is not
+			-- in the scoreboard player data yet, we don't want to trigger a stack overflow.
+			CALLING = true
+
+			xpcall( UpdateScoreboardEntries, ErrorHandler )
+
+			CALLING = false
+		end )
+	end )
+
+	return
+end
 
 local Abs = math.abs
 local Floor = math.floor
-local GetOwner = Server.GetOwner
+local IsType = Shine.IsType
+local IsValid = debug.isvalid
 local pairs = pairs
+local StringFind = string.find
 local StringFormat = string.format
+local StringLower = string.lower
+local StringMatch = string.match
+local TableNew = require "table.new"
 local TableRemove = table.remove
+local TableShallowCopy = table.ShallowCopy
 local TableShuffle = table.Shuffle
 local TableSort = table.sort
 local TableToString = table.ToString
 local tonumber = tonumber
-local Traceback = debug.traceback
-local type = type
 
 --[[
 	Returns whether the given client is valid.
+
+	This returns false for clients that are disconnecting.
 ]]
 function Shine:IsValidClient( Client )
 	return Client and self.GameIDs:Get( Client ) ~= nil
 end
 
-local function OnJoinError( Error )
-	local Trace = Traceback()
+--[[
+	Returns whether the given value is a "ServerClient" object that is still valid for interactions.
 
-	Shine:DebugLog( "Error: %s.\nEvenlySpreadTeams failed. %s", true, Error, Trace )
-	Shine:AddErrorReport( StringFormat(
-		"A player failed to join a team in EvenlySpreadTeams: %s.", Error ), Trace )
+	This includes clients that are disconnecting.
+]]
+function Shine.IsValidOrDisconnectingClient( Client )
+	return IsType( Client, "userdata" ) and IsValid( Client ) and IsType( Client.isa, "function" )
+		and Client:isa( "ServerClient" )
 end
 
 --[[
-	Ensures no team has more than 1 extra player compared to the other.
+	Disconnects the given client, accounting for bots.
 ]]
-function Shine.EvenlySpreadTeams( Gamerules, TeamMembers )
+function Shine:DisconnectClient( Client, ... )
+	self.AssertAtLevel( self:IsValidClient( Client ), "Invalid client passed to DisconnectClient!", 3 )
+
+	Client.DisconnectReason = ... or Client.DisconnectReason
+
+	if Client.bot and IsType( Client.bot.Disconnect, "function" ) then
+		-- Bots need to call their specific Disconnect() method, otherwise their entities are orphaned.
+		return Client.bot:Disconnect()
+	end
+
+	-- Have to pass a var-arg here, otherwise the overload type checking will error for a nil message.
+	return Server.DisconnectClient( Client, ... )
+end
+
+--[[
+	Returns the client associated with the given player.
+]]
+function Shine.GetClientForPlayer( Player )
+	return Player.GetClient and Player:GetClient()
+end
+
+function Shine.EqualiseTeamCounts( TeamMembers )
 	local Marine = TeamMembers[ 1 ]
 	local Alien = TeamMembers[ 2 ]
 
-	local NumMarine = #TeamMembers[ 1 ]
-	local NumAlien = #TeamMembers[ 2 ]
+	local NumMarine = #Marine
+	local NumAlien = #Alien
 
 	local MarineGreater = NumMarine > NumAlien
 	local Diff = Abs( NumMarine - NumAlien )
@@ -105,86 +219,110 @@ function Shine.EvenlySpreadTeams( Gamerules, TeamMembers )
 		end
 	end
 
-	local Reported
+	return Diff
+end
 
-	if Abs( #Marine - #Alien ) > 1 then
-		local VoteRandom = Shine.Plugins.voterandom
+do
+	local OnJoinError = Shine.BuildErrorHandler( "EvenlySpreadTeams team join error" )
 
-		if VoteRandom then
-			local BalanceMode = VoteRandom.Config.BalanceMode
+	local function MoveToTeam( Gamerules, Players, TeamNumber )
+		for i = #Players, 1, -1 do
+			local Player = Players[ i ]
+			if Player:GetTeamNumber() ~= TeamNumber then
+				local Success, JoinSuccess, NewPlayer = xpcall( Gamerules.JoinTeam,
+					OnJoinError, Gamerules, Player, TeamNumber,
+					true, true )
 
-			local Marines = TableToString( Marine )
-			local Aliens = TableToString( Alien )
-
-			Shine:AddErrorReport( "Team sorting resulted in imbalanced teams before applying.",
-				"Balance Mode: %s. Marine Size: %s. Alien Size: %s. Diff: %s. New Teams:\nMarines:\n%s\nAliens:\n%s",
-				true, BalanceMode, NumMarine, NumAlien, Diff, Marines, Aliens )
-		end
-
-		Reported = true
-	end
-
-	local MarineTeam = Gamerules.team1
-	local AlienTeam = Gamerules.team2
-
-	for i, Player in pairs( Marine ) do
-		local Success, JoinSuccess, NewPlayer = xpcall( Gamerules.JoinTeam,
-			OnJoinError, Gamerules, Player, 1, nil, true )
-
-		if Success then
-			Marine[ i ] = NewPlayer
-		else
-			Marine[ i ] = nil
+				if Success then
+					Players[ i ] = NewPlayer
+				else
+					TableRemove( Players, i )
+				end
+			end
 		end
 	end
 
-	for i, Player in pairs( Alien ) do
-		local Success, JoinSuccess, NewPlayer = xpcall( Gamerules.JoinTeam,
-			OnJoinError, Gamerules, Player, 2, nil, true )
-
-		if Success then
-			Alien[ i ] = NewPlayer
-		else
-			Alien[ i ] = nil
+	local function ForceTeamSwap( Gamerules, Player, TeamNumber, Force, ShineForce )
+		if ShineForce then
+			return true, TeamNumber
 		end
 	end
 
-	local NewMarineCount = MarineTeam:GetNumPlayers()
-	local NewAlienCount = AlienTeam:GetNumPlayers()
-	local NewDiff = Abs( NewMarineCount - NewAlienCount )
+	local Inspect = require "shine/lib/inspect"
 
-	if NewDiff > 1 and not Reported then
-		local VoteRandom = Shine.Plugins.voterandom
-
-		if VoteRandom then
-			local BalanceMode = VoteRandom.Config.BalanceMode
-
-			local Marines = TableToString( Marine )
-			local Aliens = TableToString( Alien )
-
-			Shine:AddErrorReport( "Team sorting resulted in imbalanced teams after applying.",
-				"Balance Mode: %s. Table Marine Size: %s. Table Alien Size: %s. Table Diff: %s.\nActual Marine Size: %s. Actual Alien Size: %s. Actual Diff: %s.\nNew Teams:\nMarines:\n%s\nAliens:\n%s",
-				true, BalanceMode, NumMarine, NumAlien, Diff, NewMarineCount,
-				NewAlienCount, NewDiff, Marines, Aliens )
+	local function PlayerToOutput( Player )
+		local Client = Shine.GetClientForPlayer( Player )
+		local ClientID = "?"
+		local IsVirtual = false
+		if Shine:IsValidClient( Client ) then
+			ClientID = Client:GetId()
+			IsVirtual = Client:GetIsVirtual()
 		end
+		return StringFormat( "%s (%s[%s])", Inspect.ToString( Player ), IsVirtual and "Bot" or "Player", ClientID )
+	end
+
+	local function PlayersToString( Players )
+		return TableToString( Shine.Stream.Of( Players ):Map( PlayerToOutput ):AsTable() )
+	end
+
+	--[[
+		Ensures no team has more than 1 extra player compared to the other.
+	]]
+	function Shine.EvenlySpreadTeams( Gamerules, TeamMembers, BalanceMode )
+		Hook.Call( "PreEvenlySpreadTeams", Gamerules, TeamMembers )
+
+		-- Yes, we repeat this, but the reporting needs it...
+		local Marine = TeamMembers[ 1 ]
+		local Alien = TeamMembers[ 2 ]
+
+		local NumMarine = #Marine
+		local NumAlien = #Alien
+		local Diff = Shine.EqualiseTeamCounts( TeamMembers )
+
+		local MarineTeam = Gamerules.team1
+		local AlienTeam = Gamerules.team2
+
+		-- Override all plugin hooks to prevent them interfering with the swapping process.
+		-- Some people implement JoinTeam hooks without respecting the ShineForce parameter...
+		Hook.Add( "JoinTeam", "StopPeopleBreakingShuffle", ForceTeamSwap, Hook.MAX_PRIORITY )
+
+		MoveToTeam( Gamerules, Marine, 1 )
+		MoveToTeam( Gamerules, Alien, 2 )
+
+		Hook.Remove( "JoinTeam", "StopPeopleBreakingShuffle" )
+
+		if BalanceMode then
+			local NewMarineCount = MarineTeam:GetNumPlayers()
+			local NewAlienCount = AlienTeam:GetNumPlayers()
+			local NewDiff = Abs( NewMarineCount - NewAlienCount )
+			-- If the number of players has changed, something else is interfering with teams and it's not our fault.
+			local IsSameAmountOfPlayers = NumMarine + NumAlien == NewMarineCount + NewAlienCount
+
+			if NewDiff > 1 and IsSameAmountOfPlayers then
+				local Marines = PlayersToString( Marine )
+				local Aliens = PlayersToString( Alien )
+				local NewMarines = PlayersToString( MarineTeam:GetPlayers() )
+				local NewAliens = PlayersToString( AlienTeam:GetPlayers() )
+
+				Shine:AddErrorReport(
+					"Team sorting resulted in imbalanced teams after applying.",
+					"Balance Mode: %s. Table Marine Size: %s. Table Alien Size: %s. Table Diff: %s.\n"..
+					"Actual Marine Size: %s. Actual Alien Size: %s. Actual Diff: %s.\n"..
+					"New Teams:\nMarines:\n%s\nActual Marines:\n%s\nAliens:\n%s\nActual Aliens:\n%s",
+					true,
+					BalanceMode, NumMarine, NumAlien, Diff,
+					NewMarineCount, NewAlienCount, NewDiff,
+					Marines, NewMarines, Aliens, NewAliens
+				)
+			end
+		end
+
+		Hook.Call( "PostEvenlySpreadTeams", Gamerules, TeamMembers )
 	end
 end
 
---[[
-	Returns the number of human players (clients).
-]]
-function Shine.GetHumanPlayerCount()
-	local Count = 0
-
-	local GameIDs = Shine.GameIDs
-
-	for Client, ID in GameIDs:Iterate() do
-		if Client.GetIsVirtual and not Client:GetIsVirtual() then
-			Count = Count + 1
-		end
-	end
-
-	return Count
+function Shine.IterateClients()
+	return Shine.GameIDs:Iterate()
 end
 
 --[[
@@ -194,9 +332,7 @@ function Shine.GetAllPlayers()
 	local Players = {}
 	local Count = 0
 
-	local GameIDs = Shine.GameIDs
-
-	for Client, ID in GameIDs:Iterate() do
+	for Client, ID in Shine.IterateClients() do
 		local Player = Client.GetControllingPlayer and Client:GetControllingPlayer()
 
 		if Player then
@@ -233,8 +369,7 @@ function Shine.GetTeamClients( Team )
 		local Ply = Players[ i ]
 
 		if Ply then
-			local Client = GetOwner( Ply )
-
+			local Client = Shine.GetClientForPlayer( Ply )
 			if Client then
 				Clients[ Count ] = Client
 				Count = Count + 1
@@ -252,9 +387,7 @@ function Shine.GetAllClients()
 	local Clients = {}
 	local Count = 0
 
-	local GameIDs = Shine.GameIDs
-
-	for Client, ID in GameIDs:Iterate() do
+	for Client, ID in Shine.IterateClients() do
 		Count = Count + 1
 		Clients[ Count ] = Client
 	end
@@ -262,14 +395,51 @@ function Shine.GetAllClients()
 	return Clients, Count
 end
 
+local Indexes = {}
+do
+	local MaxClientsTotal = Server.GetMaxPlayers() + Server.GetMaxSpectators()
+	Indexes.ByName = setmetatable( TableNew( 0, MaxClientsTotal ), { __mode = "v" } )
+	Indexes.BySteamID = setmetatable( TableNew( 0, MaxClientsTotal ), { __mode = "v" } )
+	Indexes.ByGameID = setmetatable( TableNew( 0, MaxClientsTotal ), { __mode = "v" } )
+end
+
+Hook.Add( "PlayerNameChange", Indexes, function( Player, NewName, OldName )
+	-- Name uniqueness is enforced in a case-insensitive manner (at least as far as string.lower is concerned).
+	-- Thus it makes sense to index by lower-cased names.
+	Indexes.ByName[ StringLower( OldName ) ] = nil
+	Indexes.ByName[ StringLower( NewName ) ] = Player:GetClient()
+end, Hook.MAX_PRIORITY )
+
+Hook.Add( "ClientConnect", Indexes, function( Client )
+	Indexes.BySteamID[ Client:GetUserId() ] = Client
+	Indexes.ByGameID[ Client.ShineGameID ] = Client
+end, Hook.MAX_PRIORITY + 0.1 )
+
+Hook.Add( "ClientDisconnect", Indexes, function( Client )
+	Indexes.BySteamID[ Client:GetUserId() ] = nil
+	Indexes.ByGameID[ Client.ShineGameID ] = nil
+
+	for Name, StoredClient in pairs( Indexes.ByName ) do
+		if StoredClient == Client then
+			Indexes.ByName[ Name ] = nil
+		end
+	end
+end, Hook.MIN_PRIORITY )
+
+function Shine.GetAllClientsByNS2ID()
+	return TableShallowCopy( Indexes.BySteamID )
+end
+
 --[[
 	Returns a client matching the given game ID.
 ]]
 function Shine.GetClientByID( ID )
-	local GameIDs = Shine.GameIDs
+	local IndexedClient = Indexes.ByGameID[ ID ]
+	if IndexedClient then return IndexedClient end
 
-	for Client, GameID in GameIDs:Iterate() do
+	for Client, GameID in Shine.IterateClients() do
 		if ID == GameID then
+			Indexes.ByGameID[ ID ] = Client
 			return Client
 		end
 	end
@@ -281,12 +451,14 @@ end
 	Returns a client matching the given Steam ID.
 ]]
 function Shine.GetClientByNS2ID( ID )
-	if type( ID ) ~= "number" then return nil end
+	if not IsType( ID, "number" ) then return nil end
 
-	local Clients = Shine.GameIDs
+	local IndexedClient = Indexes.BySteamID[ ID ]
+	if IndexedClient then return IndexedClient end
 
-	for Client in Clients:Iterate() do
+	for Client in Shine.IterateClients() do
 		if Client:GetUserId() == ID then
+			Indexes.BySteamID[ ID ] = Client
 			return Client
 		end
 	end
@@ -294,100 +466,178 @@ function Shine.GetClientByNS2ID( ID )
 	return nil
 end
 
---[[
-	Returns the client closest matching the given name.
-]]
-function Shine.GetClientByName( Name )
-	if type( Name ) ~= "string" then return nil end
+do
+	-- Unlike SteamID and game ID, names can change. While the hook above should capture these changes, it doesn't hurt
+	-- to be absolutely sure that the indexed client is correct and this is still less work than checking all players.
+	local function SanityCheckNameIndex( Client, Name )
+		if not Client then return nil end
 
-	Name = Name:lower()
-
-	local Clients = Shine.GameIDs
-	local SortTable = {}
-	local Count = 0
-
-	for Client in Clients:Iterate() do
 		local Player = Client:GetControllingPlayer()
-
-		if Player then
-			local Find = Player:GetName():lower():find( Name, 1, true )
-
-			if Find then
-				Count = Count + 1
-				SortTable[ Count ] = { Client = Client, Index = Find }
-			end
+		local ActualName = Player and StringLower( Player:GetName() )
+		if Name == ActualName then
+			return Client
 		end
+
+		Indexes.ByName[ Name ] = nil
+		if ActualName and ActualName ~= "" then
+			Indexes.ByName[ ActualName ] = Client
+		end
+
+		return nil
 	end
 
-	if Count == 0 then return nil end
-
-	--Get the match with the string furthest to the left in their name.
-	TableSort( SortTable, function( A, B )
+	local function CompareResults( A, B )
 		return A.Index < B.Index
-	end )
+	end
 
-	return SortTable[ 1 ].Client
+	--[[
+		Returns the client closest matching the given name.
+	]]
+	function Shine.GetClientByName( Name )
+		if not IsType( Name, "string" ) or #Name == 0 then return nil end
+
+		local SearchName = StringLower( Name )
+		local IndexedClient = Indexes.ByName[ SearchName ]
+		if SanityCheckNameIndex( IndexedClient, SearchName ) then
+			return IndexedClient
+		end
+
+		local SortTable = {}
+		local Count = 0
+
+		for Client in Shine.IterateClients() do
+			local Player = Client:GetControllingPlayer()
+			if Player then
+				local PlayerName = StringLower( Player:GetName() )
+				-- Always favour an exact match.
+				if PlayerName == SearchName then return Client end
+
+				local StartIndex = StringFind( PlayerName, SearchName, 1, true )
+				if StartIndex then
+					Count = Count + 1
+					SortTable[ Count ] = { Client = Client, Index = StartIndex }
+				end
+			end
+		end
+
+		if Count == 0 then return nil end
+
+		-- Get the match with the string furthest to the left in their name.
+		TableSort( SortTable, CompareResults )
+
+		return SortTable[ 1 ].Client
+	end
+
+	--[[
+		Returns the client with the exact name given (ignoring case as it is not accounted for when determining
+		uniqueness of names).
+	]]
+	function Shine.GetClientByExactName( Name )
+		if not IsType( Name, "string" ) or #Name == 0 then return nil end
+
+		local SearchName = StringLower( Name )
+		local IndexedClient = Indexes.ByName[ SearchName ]
+		if SanityCheckNameIndex( IndexedClient, SearchName ) then
+			return IndexedClient
+		end
+
+		for Client in Shine.IterateClients() do
+			local Player = Client:GetControllingPlayer()
+			if Player and StringLower( Player:GetName() ) == SearchName then
+				Indexes.ByName[ SearchName ] = Client
+				return Client
+			end
+		end
+
+		return nil
+	end
 end
 
 function Shine.NS2ToSteamID( ID )
 	ID = tonumber( ID )
 	if not ID then return "" end
 
-	return StringFormat( "STEAM_0:%i:%i", ID % 2, Floor( ID * 0.5 ) )
+	return StringFormat( "STEAM_0:%d:%d", ID % 2, Floor( ID * 0.5 ) )
 end
 
 function Shine.NS2ToSteam3ID( ID )
 	ID = tonumber( ID )
 	if not ID then return "" end
 
-	return StringFormat( "[U:1:%i]", ID )
+	return StringFormat( "[U:1:%d]", ID )
 end
 
 function Shine.SteamIDToNS2( ID )
-	if type( ID ) ~= "string" then return nil end
+	if not IsType( ID, "string" ) then return nil end
 
-	--STEAM_0:X:YYYYYYY
-	if ID:match( "^STEAM_%d:%d:%d+$" ) then
-		local Num = tonumber( ID:sub( 11 ) )
-		local Extra = tonumber( ID:sub( 9, 9 ) )
+	-- STEAM_0:X:YYYYYYY
+	local ID1, ID2 = StringMatch( ID, "^STEAM_%d:(%d):(%d+)$" )
+	if ID1 then
+		local Num = tonumber( ID2 )
+		local Extra = tonumber( ID1 )
 
 		return Num * 2 + Extra
 	else
-		--[U:1:YYYYYYY]
-		local NS2ID = ID:match( "^%[U:%d:(%d+)%]$" )
+		-- [U:1:YYYYYYY]
+		local NS2ID = StringMatch( ID, "^%[U:%d:(%d+)%]$" )
 		if not NS2ID then return nil end
 
 		return tonumber( NS2ID )
 	end
 end
 
+do
+	local RemovedDigits = 6
+	local SteamID64Int = 197960265728
+	local StringSub = string.sub
+
+	--[[
+		Lua in NS2 uses double precision floats, which cannot express a 64 bit
+		integer entirely. Thus, the first 5 digits are ignored, as the 32bit
+		Steam ID should never bring the 64 bit ID to the point where it has to increment
+		any of those digits.
+	]]
+	function Shine.NS2IDTo64( ID )
+		return StringFormat( "76561%s", ID + SteamID64Int )
+	end
+
+	function Shine.SteamID64ToNS2ID( SteamID64 )
+		local UsableInt = tonumber( StringSub( SteamID64, RemovedDigits ) )
+		return UsableInt - SteamID64Int
+	end
+end
+
 function Shine:GetClientBySteamID( ID )
-	if type( ID ) ~= "string" then return nil end
+	if not IsType( ID, "string" ) then return nil end
 
 	local NS2ID = self.SteamIDToNS2( ID )
-
 	if not NS2ID then return nil end
 
 	return self.GetClientByNS2ID( NS2ID )
 end
 
---[[
-	Returns a client matching the given Steam ID or name.
-]]
-function Shine:GetClient( String )
-	if type( String ) == "number" or tonumber( String ) then
-		local Num = tonumber( String )
+do
+	-- Only accept positive base-10 integer values, no hex, no inf, no nan.
+	local function SafeToNumber( String )
+		if IsType( String, "number" ) then return String end
+		if not StringMatch( String, "^[0-9]+$" ) then return nil end
+		return tonumber( String )
+	end
+	Shine.CoerceToID = SafeToNumber
 
-		local Result = self.GetClientByID( Num ) or self.GetClientByNS2ID( Num )
-
-		if not Result then
-			return self.GetClientByName( tostring( String ) )
+	--[[
+		Returns a client matching the given Steam ID or name.
+	]]
+	function Shine:GetClient( String )
+		local NumberValue = SafeToNumber( String )
+		if NumberValue then
+			-- Do not look up by name if provided a number, only NS2ID and game ID.
+			-- Use NS2ID first as the admin menu uses it.
+			return self.GetClientByNS2ID( NumberValue ) or self.GetClientByID( NumberValue )
 		end
 
-		return Result
+		return self:GetClientBySteamID( String ) or self.GetClientByName( tostring( String ) )
 	end
-
-	return self:GetClientBySteamID( String ) or self.GetClientByName( tostring( String ) )
 end
 
 --[[
@@ -397,7 +647,7 @@ function Shine:GetClientsWithAccess( Access )
 	local Ret = {}
 	local Count = 0
 
-	for Client in self.GameIDs:Iterate() do
+	for Client in self.IterateClients() do
 		if self:HasAccess( Client, Access ) then
 			Count = Count + 1
 			Ret[ Count ] = Client
@@ -420,12 +670,10 @@ end
 function Shine:GetClientsByGroup( Group )
 	if Group ~= "guest" and not self.UserData.Groups[ Group ] then return {} end
 
-	local Clients = self.GameIDs
-
 	local Count = 0
 	local Ret = {}
 
-	for Client in Clients:Iterate() do
+	for Client in self.IterateClients() do
 		if self:IsInGroup( Client, Group ) then
 			Count = Count + 1
 			Ret[ Count ] = Client
@@ -439,12 +687,24 @@ local ConsoleInfo = "Console[N/A]"
 
 function Shine.GetClientInfo( Client )
 	if not Client then return ConsoleInfo end
+	if not Shine.IsValidOrDisconnectingClient( Client ) then
+		return "<Invalid>[?]"
+	end
 
 	local Player = Client:GetControllingPlayer()
 
 	if not Player then
-		return StringFormat( "Unknown[%i]", Client:GetUserId() )
+		return StringFormat( "Unknown[%d]", Client:GetUserId() )
 	end
 
-	return StringFormat( "%s[%i]", Player:GetName(), Client:GetUserId() )
+	return StringFormat( "%s[%d]", Player:GetName(), Client:GetUserId() )
+end
+
+function Shine.GetClientName( Client )
+	if not Client then return "Console" end
+
+	local Player = Client:GetControllingPlayer()
+	if not Player then return "Unknown" end
+
+	return Player:GetName()
 end

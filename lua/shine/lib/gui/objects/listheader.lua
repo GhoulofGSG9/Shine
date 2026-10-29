@@ -11,33 +11,21 @@ local Padding = Vector( 10, 0, 0 )
 function ListHeader:Initialise()
 	self.BaseClass.Initialise( self )
 
-	local Background = GetGUIManager():CreateGraphicItem()
-
+	local Background = self:MakeGUIItem()
 	self.Background = Background
 
-	local Scheme = SGUI:GetSkin()
+	local SortIndicator = SGUI:Create( "Label", self )
+	SortIndicator:SetIsSchemed( false )
+	SortIndicator:SetFont( SGUI.Fonts.Ionicons )
+	SortIndicator:SetText( "" )
+	SortIndicator:SetAnchor( "CenterRight" )
+	SortIndicator:SetTextAlignmentY( GUIItem.Align_Center )
+	SortIndicator:SetTextAlignmentX( GUIItem.Align_Max )
+	SortIndicator:SetPos( Vector2( -8, 0 ) )
 
-	Background:SetColor( Scheme.List.HeaderColour )
-
-	self.ActiveCol = Scheme.List.ActiveHeaderColour
-	self.InactiveCol = Scheme.List.HeaderColour
+	self.SortIndicator = SortIndicator
 
 	self:SetHighlightOnMouseOver( true )
-end
-
-function ListHeader:OnSchemeChange( Scheme )
-	if not self.UseScheme then return end
-
-	self.ActiveCol = Scheme.List.ActiveHeaderColour
-	self.InactiveCol = Scheme.List.HeaderColour
-
-	self.Background:SetColor( self.Highlighted and self.ActiveCol or self.InactiveCol )
-
-	self.TextColour = Scheme.List.HeaderTextColour or Scheme.BrightText
-
-	if self.TextObj then
-		self.TextObj:SetColor( self.TextColour )
-	end
 end
 
 function ListHeader:SetText( Text )
@@ -47,71 +35,49 @@ function ListHeader:SetText( Text )
 		return
 	end
 
-	local TextObj = GetGUIManager():CreateTextItem()
-	TextObj:SetAnchor( GUIItem.Left, GUIItem.Center )
+	local TextObj = SGUI:Create( "Label", self )
+	TextObj:SetIsSchemed( false )
+	TextObj:SetAnchorFraction( 0, 0.5 )
 	TextObj:SetText( Text )
 	TextObj:SetTextAlignmentY( GUIItem.Align_Center )
-	TextObj:SetPosition( Padding )
+	TextObj:SetPos( Padding )
+	TextObj:SetColour( self.TextColour )
 	if self.Font then
 		TextObj:SetFont( self.Font )
 	end
 	if self.TextScale then
-		TextObj:SetScale( self.TextScale )
+		TextObj:SetTextScale( self.TextScale )
 	end
-
-	self.Background:AddChild( TextObj )
-
-	local Scheme = SGUI:GetSkin()
-
-	TextObj:SetColor( self.TextColour or Scheme.BrightText )
 
 	self.TextObj = TextObj
 end
 
-function ListHeader:SetTextScale( Scale )
-	self.TextScale = Scale
+SGUI.AddBoundProperty( ListHeader, "Font", "TextObj" )
+SGUI.AddBoundProperty( ListHeader, "TextColour", "TextObj:SetColour" )
+SGUI.AddBoundProperty( ListHeader, "TextScale", "TextObj" )
 
-	if not self.TextObj then return end
+function ListHeader:SetSorted( IsSorted, Descending )
+	if not IsSorted then
+		self.SortIndicator:SetText( "" )
+		return
+	end
 
-	self.TextObj:SetScale( Scale )
-end
+	-- Update the sorting indicator to point in the sorting direction.
+	local Font, Scale = SGUI.FontManager.GetFontForAbsoluteSize(
+		SGUI.FontFamilies.Ionicons,
+		self:GetSize().y
+	)
+	self.SortIndicator:SetFontScale( Font, Scale )
 
-function ListHeader:SetFont( Font )
-	self.Font = Font
-
-	if not self.TextObj then return end
-
-	self.TextObj:SetFontName( Font )
-end
-
-function ListHeader:SetTextColour( Col )
-	self.TextColour = Col
-
-	if not self.TextObj then return end
-
-	self.TextObj:SetColor( Col )
-end
-
-function ListHeader:SetSize( Size )
-	self.Size = Size
-
-	self.Background:SetSize( Size )
-end
-
-function ListHeader:GetSize()
-	return self.Size
-end
-
-function ListHeader:GetIsVisible()
-	if not self.Parent:GetIsVisible() then return false end
-
-	return self.Background:GetIsVisible()
+	local IconName = Descending and "ChevronDown" or "ChevronUp"
+	self.SortIndicator:SetText( SGUI.Icons.Ionicons[ IconName ] )
+	self.SortIndicator:SetColour( self.TextColour )
 end
 
 function ListHeader:OnMouseDown( Key, DoubleClick )
 	if not self:GetIsVisible() then return end
 	if Key ~= InputKey.MouseButton0 then return end
-	if not self:MouseIn( self.Background, self.HighlightMult ) then return end
+	if not self:HasMouseEntered() then return end
 
 	return true, self
 end
@@ -119,7 +85,7 @@ end
 function ListHeader:OnMouseUp( Key )
 	if not self:GetIsVisible() then return end
 	if Key ~= InputKey.MouseButton0 then return end
-	if not self:MouseIn( self.Background, self.HighlightMult ) then return end
+	if not self:HasMouseEntered() then return end
 
 	self.Parent:SortRows( self.Index )
 	Shared.PlaySound( nil, SGUI.Controls.Button.Sound )
@@ -127,10 +93,4 @@ function ListHeader:OnMouseUp( Key )
 	return true
 end
 
-function ListHeader:Think( DeltaTime )
-	if not self:GetIsVisible() then return end
-
-	self.BaseClass.Think( self, DeltaTime )
-end
-
-SGUI:Register( "ListHeader", ListHeader )
+SGUI:Register( "ListHeader", ListHeader, "Button" )

@@ -4,135 +4,259 @@
 	Think right clicking the desktop in Windows, that kind of menu.
 ]]
 
+local IsType = Shine.IsType
 local SGUI = Shine.GUI
+local Controls = SGUI.Controls
+local Units = SGUI.Layout.Units
+
+local Max = math.max
+local Min = math.min
 
 local Menu = {}
 
 Menu.IsWindow = true
 
 local DefaultSize = Vector( 200, 32, 0 )
-local DefaultOffset = Vector( 0, 32, 0 )
-local Padding = Vector( 0, 0, 0 )
+
+SGUI.AddProperty( Menu, "ButtonSpacing" )
+SGUI.AddProperty( Menu, "ButtonWidthPadding" )
+SGUI.AddProperty( Menu, "MaxVisibleButtons" )
+SGUI.AddProperty( Menu, "Font" )
+SGUI.AddProperty( Menu, "TextScale" )
 
 function Menu:Initialise()
-	self.BaseClass.Initialise( self )
-
-	local Background = GetGUIManager():CreateGraphicItem()
-
-	self.Background = Background
-
-	local Scheme = SGUI:GetSkin()
-
-	Background:SetColor( Scheme.MenuButton )
+	Controls.Panel.Initialise( self )
 
 	self.ButtonSize = DefaultSize
-	self.ButtonOffset = DefaultOffset
 	self.Buttons = {}
 	self.ButtonCount = 0
+	self.ButtonSpacing = Units.Absolute( 0 )
+	self.ButtonWidthPadding = Units.Absolute( 0 )
 
 	self.Font = Fonts.kAgencyFB_Small
+	self:SetLayout( SGUI.Layout:CreateLayout( "Vertical" ) )
 end
 
-function Menu:OnSchemeChange( Scheme )
-	if not self.UseScheme then return end
+function Menu:SetMaxVisibleButtons( Max, ScrollbarWidth )
+	local Width = ScrollbarWidth or Units.HighResScaled( 8 ):GetValue()
 
-	self.Background:SetColor( Scheme.MenuButton )
-	for i = 1, #Buttons do
-		Buttons[ i ]:SetInactiveCol( Scheme.MenuButton )
-	end
+	self.MaxVisibleButtons = Max
+	self:SetScrollable()
+	self:SetScrollbarPos( Vector( -Width, 0, 0 ) )
+	self:SetScrollbarWidth( Width )
+	self:SetScrollbarHeightOffset( 0 )
+	self.BufferAmount = 0
+	self:SetHorizontalScrollingEnabled( false )
 end
 
-function Menu:SetIsVisible( Bool )
-	if not self.Background then return end
-	if self.Background:GetIsVisible() == Bool then return end
-
-	self.Background:SetIsVisible( Bool )
-
-	local Buttons = self.Buttons
-
-	for i = 1, #Buttons do
-		Buttons[ i ]:SetIsVisible( Bool )
+local function OnPaddingChanged( self, Padding )
+	if Padding then
+		self.ButtonWidth:SetValue( 1, self.DefaultButtonWidth - Padding[ 1 ] - Padding[ 3 ] )
+	else
+		self.ButtonWidth:SetValue( 1, self.DefaultButtonWidth )
 	end
 end
 
 function Menu:SetButtonSize( Vec )
 	self.ButtonSize = Vec
-	self.ButtonOffset = Vector( 0, Vec.y, 0 )
+	self.UseAutoSize = not IsType( Vec, "cdata" )
+
+	if self.UseAutoSize then
+		local IsUnitVector = Shine.Implements( Vec, Units.UnitVector )
+		local InitialWidth = IsUnitVector and Vec[ 1 ] or nil
+
+		self.DefaultButtonWidth = InitialWidth
+
+		if InitialWidth then
+			local Padding = self:GetPadding()
+			if Padding then
+				InitialWidth = InitialWidth - Padding[ 1 ] - Padding[ 3 ]
+			end
+			self:AddPropertyChangeListener( "Padding", OnPaddingChanged )
+		else
+			self:RemovePropertyChangeListener( "Padding", OnPaddingChanged )
+		end
+
+		self.ButtonHeight = IsUnitVector and Vec[ 2 ] or Vec
+		self.ButtonWidth = Units.Max( InitialWidth )
+	else
+		self:RemovePropertyChangeListener( "Padding", OnPaddingChanged )
+		self.ButtonHeight = nil
+		self.ButtonWidth = nil
+	end
+end
+
+function Menu:SetButtonSpacing( ButtonSpacing )
+	if IsType( Vec, "cdata" ) then
+		self.ButtonSpacing = SGUI.Layout.ToUnit( ButtonSpacing.y )
+	else
+		self.ButtonSpacing = ButtonSpacing
+	end
+
+	self.Layout:SetPadding( Units.Spacing( 0, 0, 0, self.ButtonSpacing ) )
+	for i = 1, self.ButtonCount do
+		self.Buttons[ i ]:SetMargin( Units.Spacing( 0, self.ButtonSpacing, 0, 0 ) )
+	end
 end
 
 function Menu:AddButton( Text, DoClick, Tooltip )
-	local Button = SGUI:Create( "Button", self )
-	Button:SetAnchor( GUIItem.Left, GUIItem.Top )
-	Button:SetPos( Padding + self.ButtonCount * self.ButtonOffset )
+	local Button = self.MaxVisibleButtons and self:Add( "Button" ) or SGUI:Create( "Button", self )
 	Button:SetDoClick( DoClick )
-	Button:SetSize( self.ButtonSize )
+
+	if self.UseAutoSize then
+		self.ButtonWidth:AddValue( Units.Auto( Button ) + self.ButtonWidthPadding )
+		Button:SetAutoSize( Units.UnitVector( self.ButtonWidth, self.ButtonHeight ) )
+	else
+		Button:SetSize( self.ButtonSize )
+	end
+	Button:SetMargin( Units.Spacing( 0, self.ButtonSpacing, 0, 0 ) )
+
 	Button:SetText( Text )
 	if self.Font then
 		Button:SetFont( self.Font )
 	end
-	Button.UseScheme = false
+	if self.TextScale then
+		Button:SetTextScale( self.TextScale )
+	end
+	Button:SetStyleName( "MenuButton" )
 	if Tooltip then
 		Button:SetTooltip( Tooltip )
 	end
 
-	local Scheme = SGUI:GetSkin()
-	Button:SetInactiveCol( Scheme.MenuButton )
-
 	self.ButtonCount = self.ButtonCount + 1
-
-	self.Background:SetSize( Padding * 2 + self.ButtonSize
-		+ ( self.ButtonCount - 1 ) * self.ButtonOffset )
-
 	self.Buttons[ self.ButtonCount ] = Button
+
+	self.Layout:AddElement( Button )
+	self:Resize()
 
 	return Button
 end
 
+--[[
+	Ensures all icons use up the same amount of horizontal space.
+	This is useful when aligning button text/icons to the left as it aligns the text vertically across all buttons.
+]]
+function Menu:AutoSizeButtonIcons()
+	local Size = Units.Max()
+	for i = 1, self.ButtonCount do
+		local Button = self.Buttons[ i ]
+		if Button.Icon then
+			Size:AddValue( Units.Auto( Button.Icon ) )
+			Button:SetIconMargin( Units.Spacing( 0, 0, Size - Units.Auto.INSTANCE + Units.HighResScaled( 8 ), 0 ) )
+		end
+	end
+end
+
+function Menu:SetFont( Font )
+	self.Font = Font
+	self:ForEach( "Buttons", "SetFont", Font )
+end
+
+function Menu:SetTextScale( TextScale )
+	self.TextScale = TextScale
+	self:ForEach( "Buttons", "SetTextScale", TextScale )
+end
+
+function Menu:AddPanel( Panel )
+	Panel:SetParent( self )
+	Panel:SetStyleName( "MenuPanel" )
+	Panel:SetAnchor( GUIItem.Left, GUIItem.Top )
+
+	if self.UseAutoSize then
+		self.ButtonWidth:AddValue( Units.Auto( Panel ) + self.ButtonWidthPadding )
+		Panel:SetAutoSize( Units.UnitVector( self.ButtonWidth, self.ButtonHeight ) )
+	else
+		Panel:SetSize( self.ButtonSize )
+	end
+
+	Panel:SetMargin( Units.Spacing( 0, self.ButtonSpacing, 0, 0 ) )
+
+	self.ButtonCount = self.ButtonCount + 1
+	self.Buttons[ self.ButtonCount ] = Panel
+
+	self.Layout:AddElement( Panel )
+	self:Resize()
+
+	return Panel
+end
+
+function Menu:Resize()
+	local MenuWidth = 0
+	local MenuHeight = 0
+
+	self:InvalidateLayout( true )
+
+	local Padding = self:GetComputedPadding()
+	local LayoutPadding = self.Layout:GetComputedPadding()
+	local MaxHeightIndex = self.MaxVisibleButtons or self.ButtonCount
+	if self.UseAutoSize then
+		local MaxWidth = 0
+
+		for i = 1, self.ButtonCount do
+			local Button = self.Buttons[ i ]
+			local Size = Button:GetSize()
+			MaxWidth = Max( Size.x + Padding[ 5 ], MaxWidth )
+
+			if i <= MaxHeightIndex then
+				MenuHeight = Button:GetPos().y + Size.y + LayoutPadding[ 4 ] + Padding[ 6 ]
+			end
+		end
+
+		MenuWidth = MaxWidth
+	else
+		local NumButtons = Min( MaxHeightIndex, self.ButtonCount )
+		MenuWidth = self.ButtonSize.x + Padding[ 5 ]
+		MenuHeight = self.ButtonSize.y * NumButtons + LayoutPadding[ 4 ] * ( NumButtons + 1 ) + Padding[ 6 ]
+	end
+
+	if self.MaxVisibleButtons and MaxHeightIndex < self.ButtonCount then
+		-- Account for the scrollbar to ensure text isn't cut off.
+		MenuWidth = MenuWidth + self.ScrollbarWidth
+	end
+
+	self:SetSize( Vector2( MenuWidth, MenuHeight ) )
+end
+
+function Menu:FitToScreen()
+	local Pos = self:GetPos()
+	local Size = self:GetSize()
+	local ScreenWidth, ScreenHeight = SGUI.GetScreenSize()
+
+	if Pos.x + Size.x > ScreenWidth then
+		Pos.x = ScreenWidth - Size.x
+	elseif Pos.x < 0 then
+		Pos.x = 0
+	end
+
+	if Pos.y + Size.y > ScreenHeight then
+		Pos.y = ScreenHeight - Size.y
+	elseif Pos.y < 0 then
+		Pos.y = 0
+	end
+
+	return self:SetPos( Pos )
+end
+
 ------------------- Event calling -------------------
 function Menu:OnMouseDown( Key, DoubleClick )
-	local Result, Child = self:CallOnChildren( "OnMouseDown", Key, DoubleClick )
+	if not self:GetIsVisible() then return end
 
+	if SGUI.IsValid( self.Scrollbar ) then
+		if self.Scrollbar:OnMouseDown( Key, DoubleClick ) then
+			return true, self.Scrollbar
+		end
+	end
+
+	local Result, Child = self:CallOnChildren( "OnMouseDown", Key, DoubleClick )
 	if Result ~= nil then return true, Child end
 
-	--Delay so we don't mess up the event calling.
-	SGUI:AddPostEventAction( function()
+	-- Delay so we don't mess up the event calling.
+	SGUI:AddPostEventAction( function( Result, Control )
 		if not self:IsValid() then return end
 
-		self:SetParent()
+		self.DestroyedBy = Control
 		self:Destroy()
 	end )
 end
 
-function Menu:OnMouseMove( Down )
-	self:CallOnChildren( "OnMouseMove", Down )
-
-	if self:MouseIn( self.Background ) then
-		return true
-	end
-end
-
-function Menu:Think( DeltaTime )
-	self.BaseClass.Think( self, DeltaTime )
-
-	self:CallOnChildren( "Think", DeltaTime )
-end
-
-function Menu:OnMouseWheel( Down )
-	local Result = self:CallOnChildren( "OnMouseWheel", Down )
-
-	if Result ~= nil then return true end
-end
-
-function Menu:PlayerKeyPress( Key, Down )
-	if self:CallOnChildren( "PlayerKeyPress", Key, Down ) then
-		return true
-	end
-end
-
-function Menu:PlayerType( Char )
-	if self:CallOnChildren( "PlayerType", Char ) then
-		return true
-	end
-end
-
-SGUI:Register( "Menu", Menu )
+SGUI:Register( "Menu", Menu, "Panel" )

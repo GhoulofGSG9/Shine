@@ -8,131 +8,134 @@ local SGUI = Shine.GUI
 
 local Tooltip = {}
 Tooltip.IsWindow = true
+-- Tooltips can't have hover focus.
+Tooltip.IgnoreMouseFocus = true
 
-local Texture = "ui/insight_resources.dds"
-
-local Padding = Vector( 0, 8, 0 )
-
-local TextureCoords = { 265, 0, 1023, 98 }
+SGUI.AddBoundProperty( Tooltip, "Colour", "self:SetBackgroundColour" )
+SGUI.AddBoundProperty( Tooltip, "Texture", "Background:SetTexture" )
+SGUI.AddProperty( Tooltip, "AssociatedControl" )
 
 function Tooltip:Initialise()
 	self.BaseClass.Initialise( self )
 
-	local Manager = GetGUIManager()
-
-	local Background = Manager:CreateGraphicItem()
-	Background:SetTexture( Texture )
+	local Background = self:MakeGUIItem()
 	self.Background = Background
+	self.TextPadding = 16
 end
 
-function Tooltip:OnSchemeChange( Scheme )
-	if not self.Visible then return end
+function Tooltip:SetTextColour( Col )
+	self.TextCol = Col
 
-	if self.Text then
-		self.Text:SetColor( Scheme.BrightText )
-	end
+	if not self.Text then return end
+
+	self.Text:SetColor( Col )
 end
 
-function Tooltip:SetSize( Vec )
-	self.Size = Vec
+function Tooltip:SetTextPadding( TextPadding )
+	self.TextPadding = TextPadding
 
-	self.Background:SetSize( Vec )
-	self.Background:SetTexturePixelCoordinates( TextureCoords[ 1 ], TextureCoords[ 2 ],
-		TextureCoords[ 3 ], TextureCoords[ 4 ] )
+	if not self.Text then return end
+
+	self.Text:SetPosition( Vector2( 0, self.TextPadding * 0.5 ) )
+	self:ComputeAndSetSize( self.Text:GetText() )
 end
 
 function Tooltip:SetText( Text, Font, Scale )
-	if self.Text then
-		self.Text:SetText( Text )
+	local TextObj = self.Text
+	if not TextObj then
+		Font = Font or Fonts.kAgencyFB_Small
 
-		return
+		TextObj = self:MakeGUITextItem()
+		-- Align center doesn't want to play nice...
+		TextObj:SetAnchor( 0.5, 0 )
+		TextObj:SetTextAlignmentX( GUIItem.Align_Center )
+		TextObj:SetFontName( Font )
+		SGUI.FontManager.SetupElementForFontName( TextObj, Font )
+		TextObj:SetPosition( Vector2( 0, self.TextPadding * 0.5 ) )
+		TextObj:SetInheritsParentAlpha( true )
+		TextObj:SetColor( self.TextCol )
+
+		self.Background:AddChild( TextObj )
+		self.Text = TextObj
+	elseif Font then
+		TextObj:SetFontName( Font )
+		SGUI.FontManager.SetupElementForFontName( TextObj, Font )
 	end
 
-	local Scheme = SGUI:GetSkin()
-
-	local TextObj = GetGUIManager():CreateTextItem()
-	--Align center doesn't want to play nice...
-	TextObj:SetAnchor( GUIItem.Middle, GUIItem.Top )
-	TextObj:SetTextAlignmentX( GUIItem.Align_Center )
-	TextObj:SetText( Text )
-	TextObj:SetFontName( Font or Fonts.kAgencyFB_Small )
-	TextObj:SetPosition( Padding )
 	if Scale then
 		TextObj:SetScale( Scale )
 	end
 
+	self.TextScale = Scale
+
+	TextObj:SetText( Text )
+	self:ComputeAndSetSize( Text )
+end
+
+function Tooltip:UpdateText( Text )
+	local TextObj = self.Text
+	if not TextObj then return end
+
+	TextObj:SetText( Text )
+	self:ComputeAndSetSize( Text )
+end
+
+function Tooltip:ComputeAndSetSize( Text )
+	local Scale = self.TextScale
 	local WidthScale = Scale and Scale.x or 1
 	local HeightScale = Scale and Scale.y or 1
 
-	local Width = TextObj:GetTextWidth( Text ) * WidthScale + 32
-	local Height = TextObj:GetTextHeight( Text ) * HeightScale + 16
+	local Width = self.Text:GetTextWidth( Text ) * WidthScale + self.TextPadding
+	local Height = self.Text:GetTextHeight( Text ) * HeightScale + self.TextPadding
 
-	self:SetSize( Vector( Width, Height, 0 ) )
+	self:SetSize( Vector2( Width, Height ) )
+end
 
-	if self.Visible then
-		TextObj:SetColor( Scheme.BrightText )
-	else
-		local TextCol = SGUI.CopyColour( Scheme.BrightText )
+function Tooltip:IsAssociatedControlHidden()
+	return SGUI.IsValid( self.AssociatedControl ) and not self.AssociatedControl:ComputeVisibilityWithCropping()
+end
 
-		TextCol.a = 0
-		self.TextCol = TextCol
-
-		TextObj:SetColor( TextCol )
-	end
-
-	self.Text = TextObj
-
-	self.Background:AddChild( TextObj )
+function Tooltip:ShouldBeVisible()
+	-- Hide the tooltip if the mouse is not visible or the associated control is not visible (or its window isn't).
+	return SGUI.IsMouseVisible() and not self:IsAssociatedControlHidden()
 end
 
 function Tooltip:Think( DeltaTime )
-	if not SGUI.EnabledMouse then
+	if not self:ShouldBeVisible() then
 		self:FadeOut()
 	end
 
 	self.BaseClass.Think( self, DeltaTime )
+	self:CallOnChildren( "Think", DeltaTime )
 end
 
 function Tooltip:FadeIn()
 	local Start = self.Background:GetColor()
-	local End = Colour( Start.r, Start.g, Start.b, 1 )
+	local End = SGUI.CopyColour( Start )
+	Start.a = 0
 
+	self.Background:SetColor( Start )
 	self:FadeTo( self.Background, Start, End, 0, 0.2 )
-
-	if not self.Text then return end
-
-	Start = self.Text:GetColor()
-	End = Colour( Start.r, Start.g, Start.b, 1 )
-
-	self:FadeTo( self.Text, Start, End, 0, 0.2 )
 end
 
-function Tooltip:FadeOut( Callback )
+local function OnFadeOutComplete( self )
+	if self.FadeOutCallback then
+		self.FadeOutCallback( self.FadeOutCallbackContext )
+	end
+	self:Destroy()
+end
+
+function Tooltip:FadeOut( Callback, Context )
 	if self.FadingOut then return end
 
 	self.FadingOut = true
+	self.FadeOutCallback = Callback
+	self.FadeOutCallbackContext = Context
 
 	local Start = self.Background:GetColor()
-	local End = Colour( Start.r, Start.g, Start.b, 0 )
+	local End = SGUI.ColourWithAlpha( Start, 0 )
 
-	self:FadeTo( self.Background, Start, End, 0, 0.2, function()
-		if Callback then
-			Callback()
-		end
-
-		--Remember to remove the fade on the text!
-		self:StopFade( self.Text )
-
-		self:SetParent()
-		self:Destroy()
-	end )
-
-	if not self.Text then return end
-
-	Start = self.Text:GetColor()
-	End = Colour( Start.r, Start.g, Start.b, 0 )
-
-	self:FadeTo( self.Text, Start, End, 0, 0.2 )
+	self:FadeTo( self.Background, Start, End, 0, 0.2, OnFadeOutComplete )
 end
 
 function Tooltip:OnLoseWindowFocus()

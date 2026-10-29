@@ -6,7 +6,7 @@ Shared.RegisterNetworkMessage( "Shine_OpenedVoteMenu", {} )
 
 local PluginMessage = {
 	Shuffle = "boolean",
-	RTV = "boolean",
+	[ "Map Vote" ] = "boolean",
 	Surrender = "boolean",
 	Unstuck = "boolean",
 	MOTD = "boolean"
@@ -14,4 +14,6 @@ local PluginMessage = {
 
 Shared.RegisterNetworkMessage( "Shine_PluginData", PluginMessage )
 Shared.RegisterNetworkMessage( "Shine_RequestPluginData", {} )
-Shared.RegisterNetworkMessage( "Shine_AuthAdminMenu", {} )
+Shared.RegisterNetworkMessage( "Shine_AuthAdminMenu", {
+	CanUseAdminMenu = "boolean"
+} )

@@ -11,9 +11,7 @@ local Min = math.min
 local Random = math.random
 
 local function Clamp( Number, Lower, Upper )
-	if Number < Lower then return Lower end
-	if Number > Upper then return Upper end
-	return Number
+	return Max( Min( Number, Upper ), Lower )
 end
 math.Clamp = Clamp
 
@@ -37,6 +35,17 @@ end
 function math.Round( Number, DecimalPlaces )
 	local Mult = 10 ^ ( DecimalPlaces or 0 )
 	return Floor( Number * Mult + 0.5 ) / Mult
+end
+
+--[[
+	Rounds a value to a given modulus.
+]]
+function math.RoundTo( Number, Modulus )
+	local Diff = Number % Modulus
+	if Diff >= Modulus * 0.5 then
+		return Number + Modulus - Diff
+	end
+	return Number - Diff
 end
 
 --[[
@@ -68,13 +77,11 @@ function math.GenerateSequence( Length, Nums )
 	for i = 1, Length do
 		local Option, Index = TableRandom( Nums )
 
+		Count[ Option ] = Count[ Option ] + 1
+
 		if Count[ Option ] >= Max then
 			TableRemove( Nums, Index )
-
-			Option = TableRandom( Nums )
 		end
-
-		Count[ Option ] = Count[ Option ] + 1
 
 		Sequence[ i ] = Option
 	end
@@ -111,4 +118,34 @@ end
 function math.EaseOut( Progress, Power )
 	Progress = 1 - Progress
 	return 1 - Progress ^ Power
+end
+
+do
+	local Sqrt = math.sqrt
+	local TableAverage = table.Average
+
+	--[[
+		Computes the standard deviation of a table of values.
+	]]
+	function math.StandardDeviation( Values )
+		local Sum = 0
+		local Count = #Values
+		if Count == 0 then return 0, 0 end
+
+		local Average = TableAverage( Values )
+		for i = 1, Count do
+			Sum = Sum + ( Values[ i ] - Average ) ^ 2
+		end
+
+		return Sqrt( Sum / Count ), Average
+	end
+end
+
+--[[
+	Remaps the given value from [OldStart, OldEnd] into [NewStart, NewEnd], e.g.
+		math.Remap( 0.5, 0, 1, 10, 20 ) == 15
+]]
+function math.Remap( Value, OldStart, OldEnd, NewStart, NewEnd )
+	local FractionIntoRange = ( Value - OldStart ) / ( OldEnd - OldStart )
+	return NewStart + FractionIntoRange * ( NewEnd - NewStart )
 end

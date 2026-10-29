@@ -7,7 +7,7 @@ local function BuildPluginData( self )
 
 	return {
 		Shuffle = self:IsExtensionEnabled( "voterandom" ),
-		RTV = self:IsExtensionEnabled( "mapvote" ) and Plugins.mapvote.Config.EnableRTV or false,
+		[ "Map Vote" ] = self:IsExtensionEnabled( "mapvote" ) and Plugins.mapvote.Config.EnableRTV or false,
 		Surrender = self:IsExtensionEnabled( "votesurrender" ),
 		Unstuck = self:IsExtensionEnabled( "unstuck" ),
 		MOTD = self:IsExtensionEnabled( "motd" )
@@ -18,10 +18,48 @@ function Shine:SendPluginData( Player )
 	self:ApplyNetworkMessage( Player, "Shine_PluginData", BuildPluginData( self ), true )
 end
 
---Send plugin data on client connect.
-Shine.Hook.Add( "ClientConnect", "SendPluginData", function( Client )
-	Shine:SendPluginData( Client )
-end )
+do
+	local AuthedWithAdminMenu = Shine.UnorderedSet()
+	local function SendClientAdminMenuAccess( Client, CanUseAdminMenu )
+		Shine.SendNetworkMessage( Client, "Shine_AuthAdminMenu", {
+			CanUseAdminMenu = CanUseAdminMenu
+		}, true )
+	end
+
+	-- Send plugin data + admin menu auth state on client connect.
+	Shine.Hook.Add( "ClientConnect", "SendPluginData", function( Client )
+		Shine:SendPluginData( Client )
+
+		if Shine:HasAccess( Client, "sh_adminmenu" ) then
+			AuthedWithAdminMenu:Add( Client )
+			SendClientAdminMenuAccess( Client, true )
+		end
+	end )
+
+	Shine.Hook.Add( "ClientDisconnect", "VoteMenuAdminMenuAuth", function( Client )
+		AuthedWithAdminMenu:Remove( Client )
+	end )
+
+	Shine.Hook.Add( "OnUserReload", "VoteMenuAdminMenuAuth", function()
+		local ClientsToRemove = {}
+		local ClientsToAdd = {}
+
+		for Client in Shine.IterateClients() do
+			if AuthedWithAdminMenu:Contains( Client ) then
+				if not Shine:HasAccess( Client, "sh_adminmenu" ) then
+					ClientsToRemove[ #ClientsToRemove + 1 ] = Client
+					SendClientAdminMenuAccess( Client, false )
+				end
+			elseif Shine:HasAccess( Client, "sh_adminmenu" ) then
+				ClientsToAdd[ #ClientsToAdd + 1 ] = Client
+				SendClientAdminMenuAccess( Client, true )
+			end
+		end
+
+		AuthedWithAdminMenu:AddAll( ClientsToAdd )
+		AuthedWithAdminMenu:RemoveAll( ClientsToRemove )
+	end )
+end
 
 local VoteMenuPlugins = {
 	voterandom = true,
@@ -37,17 +75,11 @@ Shine.Hook.Add( "OnPluginUnload", "SendPluginData", function( Name )
 	Shine:SendPluginData( nil )
 end )
 
---Client's requesting plugin data.
-Server.HookNetworkMessage( "Shine_RequestPluginData", function( Client, Message )
+-- Client's requesting plugin data.
+Shine.HookNetworkMessage( "Shine_RequestPluginData", function( Client, Message )
 	Shine:SendPluginData( Client )
 end )
 
 Server.HookNetworkMessage( "Shine_OpenedVoteMenu", function( Client )
-	Shine.Hook.Call( "OnVoteMenuOpen", Client )
-end )
-
-Server.HookNetworkMessage( "Shine_AuthAdminMenu", function( Client, Message )
-	if not Shine:HasAccess( Client, "sh_adminmenu" ) then return end
-
-	Shine.SendNetworkMessage( Client, "Shine_AuthAdminMenu", {}, true )
+	Shine.Hook.Broadcast( "OnVoteMenuOpen", Client )
 end )

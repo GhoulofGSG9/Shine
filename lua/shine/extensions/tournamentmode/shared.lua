@@ -2,11 +2,11 @@
 	Tournament mode shared.
 ]]
 
-local Plugin = {}
+local Plugin = Shine.Plugin( ... )
 
-Plugin.NS2Only = true
-
-local StringFormat = string.format
+Plugin.EnabledGamemodes = {
+	[ "ns2" ] = true
+}
 
 --[[
 	We network the team names and the scores, so spectators that join
@@ -20,35 +20,30 @@ function Plugin:SetupDataTable()
 	self:AddDTVar( "integer (0 to 255)", "MarineScore", 0 )
 	self:AddDTVar( "integer (0 to 255)", "AlienScore", 0 )
 
-	self:AddNetworkMessage( "StartNag", { Message = "string (64)" }, "Client" )
+	local TeamField = "integer (1 to 2)"
+
+	self:AddNetworkMessage( "StartNag", { WaitingTeam = "integer (0 to 2)" }, "Client" )
+	self:AddNetworkMessage( "TeamReadyChange", {
+		Team = TeamField,
+		IsReady = "boolean"
+	}, "Client" )
+	self:AddNetworkMessage( "GameStartCountdown", {
+		IsFinalCountdown = "boolean",
+		CountdownTime = "integer"
+	}, "Client" )
+	self:AddNetworkMessage( "GameStartAborted", {}, "Client" )
+	self:AddNetworkMessage( "TeamPlayerNotReady", {
+		Team = TeamField,
+		PlayerName = self:GetNameNetworkField()
+	}, "Client" )
+	self:AddNetworkMessage( "PlayerReadyChange", {
+		PlayerName = self:GetNameNetworkField(),
+		IsReady = "boolean"
+	}, "Client" )
+	self:AddNetworkMessage( "TeamReadyWaiting", {
+		ReadyTeam = TeamField,
+		WaitingTeam = TeamField
+	}, "Client" )
 end
 
---[[
-	Set the insight values when we receive them.
-]]
-function Plugin:NetworkUpdate( Key, Old, New )
-	if Server then return end
-	
-	--Using team1 or team2 resets the other team's name...
-	if Key == "MarineName" and New ~= "" then
-		Shared.ConsoleCommand( StringFormat( "teams %s %s", New, self.dt.AlienName ) )
-	elseif Key == "AlienName" and New ~= "" then
-		Shared.ConsoleCommand( StringFormat( "teams %s %s", self.dt.MarineName, New ) )
-	elseif Key == "MarineScore" then
-		Shared.ConsoleCommand( StringFormat( "score1 %i", New ) )
-	elseif Key == "AlienScore" then
-		Shared.ConsoleCommand( StringFormat( "score2 %i", New ) )
-	end
-end
-
-Shine:RegisterExtension( "tournamentmode", Plugin )
-
-if Server then return end
-
-function Plugin:ReceiveStartNag( Data )
-	local Player = Client.GetLocalPlayer()
-
-	if not Player or not HasMixin( Player, "TeamMessage" ) then return end
-	
-	Player:SetTeamMessage( Data.Message:upper() )
-end
+return Plugin

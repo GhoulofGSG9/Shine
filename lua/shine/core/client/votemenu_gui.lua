@@ -8,14 +8,18 @@ local Shine = Shine
 local Hook = Shine.Hook
 local SGUI = Shine.GUI
 local IsType = Shine.IsType
+local Locale = Shine.Locale
 
 local Ceil = math.ceil
 local Cos = math.cos
 local Max = math.max
 local Pi = math.pi
+local StringFormat = string.format
 
 local VoteMenu = {}
 Shine.VoteMenu = VoteMenu
+
+SGUI:AddMixin( VoteMenu, "Visibility" )
 
 local OpenSound = "sound/NS2.fev/common/checkbox_on"
 Client.PrecacheLocalSound( OpenSound )
@@ -31,22 +35,19 @@ local FontName = Fonts.kAgencyFB_Small
 local FontScale = Vector( 1, 1, 0 )
 local TextCol = Colour( 1, 1, 1, 1 )
 
-local MenuTexture =
-{
+local MenuTexture = {
 	[ kMarineTeamType ] = "ui/marine_request_menu.dds",
 	[ kAlienTeamType ] = "ui/alien_request_menu.dds",
 	[ kNeutralTeamType ] = "ui/marine_request_menu.dds",
 }
 
-local ButtonTexture =
-{
+local ButtonTexture = {
 	[ kMarineTeamType ] = "ui/marine_request_button.dds",
 	[ kAlienTeamType ] = "ui/alien_request_button.dds",
 	[ kNeutralTeamType ] = "ui/marine_request_button.dds",
 }
 
-local ButtonHighlightTexture =
-{
+local ButtonHighlightTexture = {
 	[ kMarineTeamType ] = "ui/marine_request_button_highlighted.dds",
 	[ kAlienTeamType ] = "ui/alien_request_button_highlighted.dds",
 	[ kNeutralTeamType ] = "ui/marine_request_button_highlighted.dds",
@@ -76,7 +77,7 @@ local function GenericClick( Command )
 	if GetCanSendVote() then
 		Shared.ConsoleCommand( Command )
 
-		VoteMenu:SetIsVisible( false )
+		VoteMenu:ForceHide()
 
 		return true
 	end
@@ -89,8 +90,11 @@ local ClickFuncs = {
 	Shuffle = function()
 		return GenericClick( "sh_voterandom" )
 	end,
-	RTV = function()
-		return GenericClick( "sh_votemap" )
+	[ "Map Vote" ] = function()
+		local Enabled, MapVote = Shine:IsExtensionEnabled( "mapvote" )
+		if not Enabled then return GenericClick( "sh_votemap" ) end
+
+		return MapVote:HandleVoteMenuButtonClick( VoteMenu )
 	end,
 	Surrender = function()
 		return GenericClick( "sh_votesurrender" )
@@ -112,16 +116,20 @@ function VoteMenu:Create()
 	local WidthMult = Max( ScreenWidth / 1920, 1 )
 	local HeightMult = Max( ScreenHeight / 1080, 1 )
 
-	local function Scale( Value )
+	local function Scale( Value, ForFont )
 		local Scale
-		if ScreenWidth > 2880 then
-			Scale =  SGUI.TenEightyPScale( Value )
+		if ScreenWidth > 1920 then
+			Scale = SGUI.TenEightyPScale( Value )
 		else
 			Scale = GUIScale( Value )
 		end
 
 		if IsType( Scale, "number" ) then
 			return Scale * WidthMult
+		end
+
+		if ForFont then
+			return Scale * HeightMult
 		end
 
 		Scale.x = Scale.x * WidthMult
@@ -132,10 +140,10 @@ function VoteMenu:Create()
 
 	local BackSize = Scale( MenuSize )
 
-	if ScreenWidth <= 1920 then
+	if ScreenHeight <= SGUI.ScreenHeight.Normal then
 		self.Font = FontName
-		self.TextScale = Scale( FontScale )
-	elseif ScreenWidth <= 2880 then
+		self.TextScale = Scale( FontScale, true )
+	elseif ScreenHeight <= SGUI.ScreenHeight.Large then
 		self.Font = Fonts.kAgencyFB_Medium
 		self.TextScale = FontScale
 	else
@@ -144,11 +152,13 @@ function VoteMenu:Create()
 	end
 
 	local Background = SGUI:Create( "Panel" )
+	Background:SetDebugName( "VoteMenuBackground" )
 	Background:SetAnchor( GUIItem.Middle, GUIItem.Center )
 	Background:SetSize( BackSize )
 	Background:SetPos( -BackSize * 0.5 )
 	Background:SetTexture( MenuTexture[ self.TeamType ] )
 	Background:SetIsSchemed( false )
+	Background.AlwaysInMouseFocus = true
 
 	self.Background = Background
 
@@ -168,7 +178,30 @@ function VoteMenu:Create()
 	end
 end
 
-function VoteMenu:SetIsVisible( Bool )
+Hook.Add( "PostLoadScript:lua/GUICrosshair.lua", "VoteMenu", function( Reload )
+	local GUICrosshair = _G.GUICrosshair
+	if not GUICrosshair then return end
+
+	local OldUpdate = GUICrosshair.Update
+	function GUICrosshair:Update( DeltaTime )
+		if VoteMenu.Visible then
+			-- Hide the crosshair when the vote menu is visible.
+			if self.crosshairs then
+				self.crosshairs:SetIsVisible( false )
+			end
+			if self.reloadDial then
+				self.reloadDial:SetIsVisible( false )
+			end
+			return
+		end
+
+		return OldUpdate( self, DeltaTime )
+	end
+end )
+
+function VoteMenu:SetIsVisible( Bool, IgnoreAnim )
+	if self.Visible == Bool then return false end
+
 	if not SGUI.IsValid( self.Background ) then
 		self:Create()
 	end
@@ -182,8 +215,8 @@ function VoteMenu:SetIsVisible( Bool )
 
 		self.Background:SetIsVisible( true )
 
-		--Set the page to ensure only the correct buttons show after making the panel visible.
-		self:SetPage( self.ActivePage or "Main" )
+		-- Set the page to ensure only the correct buttons show after making the panel visible.
+		self:SetPage( self.ActivePage or "Main", IgnoreAnim )
 	else
 		SGUI:EnableMouse( false )
 
@@ -191,7 +224,15 @@ function VoteMenu:SetIsVisible( Bool )
 	end
 
 	self.Visible = Bool
+
+	return true
 end
+
+function VoteMenu:GetIsVisible()
+	return self.Visible or false
+end
+
+VoteMenu:BindVisibilityToEvents( "OnHelpScreenDisplay", "OnHelpScreenHide" )
 
 function VoteMenu:PlayerKeyPress( Key, Down )
 	if not self.Visible then return end
@@ -200,18 +241,18 @@ function VoteMenu:PlayerKeyPress( Key, Down )
 	local ChatboxEnabled = Enabled and Chatbox.Visible
 
 	if ChatUI_EnteringChatMessage() or ChatboxEnabled then
-		self:SetIsVisible( false )
+		self:ForceHide()
 
 		return
 	end
 
 	local IsCloseKey = Key == InputKey.MouseButton0 or Key == InputKey.MouseButton1
-		or Key == InputKey.Escape
+		or Key == InputKey.Escape or GetIsBinding( Key, "Use" )
 
 	if Down and IsCloseKey then
-		self:SetIsVisible( false )
+		self:ForceHide()
 
-		return
+		return Key == InputKey.Escape or nil
 	end
 end
 
@@ -221,8 +262,9 @@ Hook.Add( "PlayerKeyPress", "VoteMenuKeyPress", function( Key, Down )
 end, 1 )
 
 function VoteMenu:Think( DeltaTime )
-	local ActivePage = self.ActivePage
+	if not self.Visible then return end
 
+	local ActivePage = self.ActivePage
 	if not ActivePage then return end
 
 	local Think = self.Pages[ ActivePage ].Think
@@ -236,10 +278,12 @@ Hook.Add( "Think", "VoteMenuThink", function( DeltaTime )
 	VoteMenu:Think( DeltaTime )
 end )
 
-Hook.Add( "OnCommanderUILogout", "VoteMenuLogout", function()
-	if not VoteMenu.Visible then return end
-
-	VoteMenu:SetIsVisible( false )
+-- Close when logging in/out of a command structure to avoid mouse problems.
+Hook.Add( "OnCommanderLogout", "VoteMenuLogout", function()
+	VoteMenu:ForceHide()
+end )
+Hook.Add( "OnCommanderLogin", "VoteMenuLogin", function()
+	VoteMenu:ForceHide()
 end )
 
 function VoteMenu:OnResolutionChanged( OldX, OldY, NewX, NewY )
@@ -251,22 +295,17 @@ function VoteMenu:OnResolutionChanged( OldX, OldY, NewX, NewY )
 	local BottomButton = Buttons.Bottom
 
 	if SGUI.IsValid( TopButton ) then
-		TopButton:SetParent()
 		TopButton:Destroy()
-
 		Buttons.Top = nil
 	end
 
 	if SGUI.IsValid( BottomButton ) then
-		BottomButton:SetParent()
 		BottomButton:Destroy()
-
 		Buttons.Bottom = nil
 	end
 
 	for Key, Button in pairs( SideButtons ) do
 		if SGUI.IsValid( Button ) then
-			Button:SetParent()
 			Button:Destroy()
 		end
 
@@ -278,7 +317,7 @@ function VoteMenu:OnResolutionChanged( OldX, OldY, NewX, NewY )
 	self:Create()
 
 	if not self.Visible then
-		self:SetIsVisible( false )
+		self.Background:SetIsVisible( false )
 	end
 end
 
@@ -289,31 +328,46 @@ end )
 --[[
 	Adds a page to the menu that can be switched to with VoteMenu:SetPage().
 ]]
-function VoteMenu:AddPage( Name, PopulateFunc, ThinkFunc )
-	self.Pages[ Name ] = { Populate = PopulateFunc, Think = ThinkFunc }
+function VoteMenu:AddPage( Name, OnPopulate, OnThink, OnCleanup )
+	Shine.AssertAtLevel( Shine.IsCallable( OnPopulate ), "OnPopulate must be callable!", 3 )
+	if OnThink ~= nil then
+		Shine.AssertAtLevel( Shine.IsCallable( OnThink ), "OnThink must be callable!", 3 )
+	end
+	if OnCleanup ~= nil then
+		Shine.AssertAtLevel( Shine.IsCallable( OnCleanup ), "OnCleanup must be callable!", 3 )
+	end
+
+	self.Pages[ Name ] = {
+		Populate = OnPopulate,
+		Think = OnThink,
+		Cleanup = OnCleanup
+	}
 end
 
 --[[
 	Allows you to extend a page that has already been created.
 	Whatever you add will be called after the old populate function.
 ]]
-function VoteMenu:EditPage( Name, ExtraFunc, ExtraThink )
+function VoteMenu:EditPage( Name, ExtraPopulate, ExtraThink, ExtraCleanup )
 	local Page = self.Pages[ Name ]
+	if not Page then
+		return self:AddPage( Name, ExtraPopulate, ExtraThink, ExtraCleanup )
+	end
 
-	if not Page then return self:AddPage( Name, ExtraFunc, ExtraThink ) end
+	if ExtraPopulate then
+		Shine.AssertAtLevel( Shine.IsCallable( ExtraPopulate ), "ExtraPopulate must be callable!", 3 )
 
-	if ExtraFunc then
 		local OldPopulate = Page.Populate
-
 		Page.Populate = function( self )
 			OldPopulate( self )
-			ExtraFunc( self )
+			ExtraPopulate( self )
 		end
 	end
 
 	if ExtraThink then
-		local OldThink = Page.Think
+		Shine.AssertAtLevel( Shine.IsCallable( ExtraThink ), "ExtraThink must be callable!", 3 )
 
+		local OldThink = Page.Think
 		if OldThink then
 			Page.Think = function( self )
 				OldThink( self )
@@ -323,25 +377,59 @@ function VoteMenu:EditPage( Name, ExtraFunc, ExtraThink )
 			Page.Think = ExtraThink
 		end
 	end
+
+	if ExtraCleanup then
+		Shine.AssertAtLevel( Shine.IsCallable( ExtraCleanup ), "ExtraCleanup must be callable!", 3 )
+
+		local OldCleanup = Page.Cleanup
+		if OldCleanup then
+			Page.Cleanup = function( self )
+				OldCleanup( self )
+				ExtraCleanup( self )
+			end
+		else
+			Page.Cleanup = ExtraCleanup
+		end
+	end
 end
 
 --[[
 	Clears out the votemenu, then populate with the given page.
 ]]
-function VoteMenu:SetPage( Name )
-	--if Name == self.ActivePage then return end
-
+function VoteMenu:SetPage( Name, IgnoreAnim )
 	local Page = self.Pages[ Name ]
-
 	if not Page or not Page.Populate then return end
 
+	local OldPage = self.Pages[ self.ActivePage ]
+	if OldPage and OldPage.Cleanup then
+		OldPage.Cleanup( self )
+	end
+
 	self:Clear()
+	self.ActivePage = Name
 
 	Page.Populate( self )
 
-	self:SortSideButtons()
+	self:SortSideButtons( IgnoreAnim )
+end
 
-	self.ActivePage = Name
+local function ClearButton( self, Button )
+	if not SGUI.IsValid( Button ) then return end
+
+	self:MarkAsSelected( Button, false )
+	Button:SetIsVisible( false )
+	Button:SetTooltip( nil )
+	Button:SetIcon( nil )
+	Button:SetTextColour( TextCol )
+	Button.DefaultText = nil
+	Button.Plugin = nil
+	Button.CheckMarkXScale = nil
+	Button:SetDebugName( nil )
+
+	if Button.OnClear then
+		Button:OnClear()
+		Button.OnClear = nil
+	end
 end
 
 --[[
@@ -355,20 +443,11 @@ function VoteMenu:Clear()
 	local TopButton = Buttons.Top
 	local BottomButton = Buttons.Bottom
 
-	if SGUI.IsValid( TopButton ) then
-		TopButton:SetIsVisible( false )
-	end
-
-	if SGUI.IsValid( BottomButton ) then
-		BottomButton:SetIsVisible( false )
-	end
+	ClearButton( self, TopButton )
+	ClearButton( self, BottomButton )
 
 	for i = 1, #SideButtons do
-		local Button = SideButtons[ i ]
-
-		if SGUI.IsValid( Button ) then
-			Button:SetIsVisible( false )
-		end
+		ClearButton( self, SideButtons[ i ] )
 	end
 
 	self.ButtonIndex = 0
@@ -416,6 +495,7 @@ local function AddButton( self, Pos, Anchor, Text, DoClick )
 	local Button = SGUI:Create( "Button", self.Background )
 	Button:SetupFromTable{
 		Anchor = Anchor,
+		BorderRadii = false,
 		Size = self.ButtonSize,
 		Pos = Pos,
 		ActiveCol = White,
@@ -429,7 +509,9 @@ local function AddButton( self, Pos, Anchor, Text, DoClick )
 		DoClick = DoClick,
 		IsSchemed = false
 	}
-	Button:SetHighlightOnMouseOver( true, 1, true )
+	-- Highlighting buttons is disabled until they are in the correct position. This avoids multiple buttons flashing
+	-- highlighted when the menu is opened or the page is changed.
+	Button.OnAnimationComplete = function() Button:SetHighlightOnMouseOver( true, true ) end
 	Button.ClickDelay = 0
 
 	return Button
@@ -444,9 +526,12 @@ local function HandleButton( Button, Text, DoClick, StartPos, EndPos )
 
 	if Shine.Config.AnimateUI then
 		Button:SetPos( StartPos )
-		Button:MoveTo( nil, nil, EndPos, 0, EasingTime )
+		Button:SetHighlightOnMouseOver( false )
+		Button:MoveTo( nil, nil, EndPos, 0, EasingTime, Button.OnAnimationComplete )
 	else
 		Button:SetPos( EndPos )
+		Button:StopMoving()
+		Button.OnAnimationComplete()
 	end
 end
 
@@ -473,7 +558,9 @@ function VoteMenu:AddTopButton( Text, DoClick )
 	Buttons.Top = TopButton
 
 	if Shine.Config.AnimateUI then
-		TopButton:MoveTo( nil, nil, EndPos, 0, EasingTime )
+		TopButton:MoveTo( nil, nil, EndPos, 0, EasingTime, TopButton.OnAnimationComplete )
+	else
+		TopButton.OnAnimationComplete()
 	end
 
 	return TopButton
@@ -502,7 +589,9 @@ function VoteMenu:AddBottomButton( Text, DoClick )
 	Buttons.Bottom = BottomButton
 
 	if Shine.Config.AnimateUI then
-		BottomButton:MoveTo( nil, nil, EndPos, 0, EasingTime )
+		BottomButton:MoveTo( nil, nil, EndPos, 0, EasingTime, BottomButton.OnAnimationComplete )
+	else
+		BottomButton.OnAnimationComplete()
 	end
 
 	return BottomButton
@@ -535,6 +624,36 @@ function VoteMenu:AddSideButton( Text, DoClick )
 	return Button
 end
 
+do
+	local TickTexture = PrecacheAsset( "ui/checkmark.dds" )
+
+	--[[
+		Marks or unmarks a given button as selected.
+		Selected buttons have a checkmark added to their right-hand side.
+	]]
+	function VoteMenu:MarkAsSelected( Button, Selected )
+		local HasCheckMark = SGUI.IsValid( Button.CheckMark )
+
+		if Selected and not HasCheckMark then
+			local Height = Button:GetSize().y * 0.75
+
+			local CheckMark = SGUI:Create( "Image", Button )
+			CheckMark:SetAnchor( "CentreRight" )
+			CheckMark:SetSize( Vector2( Height, Height ) )
+			CheckMark:SetPos( Vector2(
+				-Height * ( Button.CheckMarkXScale or 1 ),
+				-Height * 0.5
+			) )
+			CheckMark:SetTexture( TickTexture )
+
+			Button.CheckMark = CheckMark
+		elseif not Selected and HasCheckMark then
+			Button.CheckMark:Destroy()
+			Button.CheckMark = nil
+		end
+	end
+end
+
 --[[
 	Positions a side button based on the number of buttons on the side.
 ]]
@@ -563,11 +682,14 @@ function VoteMenu:PositionButton( Button, Index, MaxIndex, Align, IgnoreAnim )
 
 	if not IgnoreAnim and Shine.Config.AnimateUI then
 		local Size = self.Background:GetSize()
+		Button:SetHighlightOnMouseOver( false )
 		Button:SetPos( Vector( Align == GUIItem.Right and -Size.x * 0.5 or 0,
 			Size.y * 0.5, 0 ) )
-		Button:MoveTo( nil, nil, Pos, 0, EasingTime )
+		Button:MoveTo( nil, nil, Pos, 0, EasingTime, Button.OnAnimationComplete )
 	else
 		Button:SetPos( Pos )
+		Button:StopMoving()
+		Button.OnAnimationComplete()
 	end
 end
 
@@ -587,11 +709,32 @@ function VoteMenu:SortSideButtons( IgnoreAnim )
 end
 
 function VoteMenu:AddAdminMenuButton()
-	self:AddSideButton( "Admin Menu", function()
+	self:AddSideButton( Locale:GetPhrase( "Core", "ADMIN_MENU" ), function()
 		Shared.ConsoleCommand( "sh_adminmenu" )
-		self:SetIsVisible( false )
-	end )
+		self:ForceHide()
+	end ):SetDebugName( "VoteMenuAdminMenuButton" )
 end
+
+function VoteMenu:GetButtonByPlugin( PluginName )
+	if self.ActivePage ~= "Main" then return nil end
+
+	local SideButtons = self.Buttons.Side
+	for i = 1, #SideButtons do
+		if SideButtons[ i ].Plugin == PluginName then
+			return SideButtons[ i ]
+		end
+	end
+
+	return nil
+end
+
+local PluginNames = {
+	Shuffle = "voterandom",
+	[ "Map Vote" ] = "mapvote",
+	Surrender = "votesurrender",
+	Unstuck = "unstuck",
+	MOTD = "motd"
+}
 
 --[[
 	Default page.
@@ -600,29 +743,34 @@ VoteMenu:AddPage( "Main", function( self )
 	local ActivePlugins = Shine.ActivePlugins
 
 	for i = 1, #ActivePlugins do
-		local Plugin = ActivePlugins[ i ]
+		local PluginButton = ActivePlugins[ i ]
 
-		self:AddSideButton( Plugin, ClickFuncs[ Plugin ] )
+		local Enabled, Plugin = Shine:IsExtensionEnabled( PluginNames[ PluginButton ] )
+		local Text = Locale:GetPhrase( "Core", PluginButton )
+		if Enabled then
+			Text = Plugin.GetVoteButtonText and Plugin:GetVoteButtonText() or Text
+		end
+
+		local Button = self:AddSideButton( Text, ClickFuncs[ PluginButton ] )
+		Button.Plugin = PluginButton
+		Button.DefaultText = Text
+		Button:SetDebugName( StringFormat( "VoteMenu%sButton", PluginButton ) )
+
+		if Enabled and Plugin and Plugin.OnVoteButtonCreated then
+			Plugin:OnVoteButtonCreated( Button, VoteMenu )
+		end
 	end
 
-	if self.RequestedAdminMenu == nil then
-		self.RequestedAdminMenu = true
-
-		Shine.SendNetworkMessage( "Shine_AuthAdminMenu", {}, true )
-
-		return
-	end
+	self:AddSideButton( Locale:GetPhrase( "Core", "CLIENT_CONFIG_MENU" ), function()
+		Shared.ConsoleCommand( "sh_clientconfigmenu" )
+		self:ForceHide()
+	end ):SetDebugName( "VoteMenuClientConfigButton" )
 
 	if not self.CanViewAdminMenu then return end
 
 	self:AddAdminMenuButton()
 end )
 
-Client.HookNetworkMessage( "Shine_AuthAdminMenu", function( Data )
-	VoteMenu.CanViewAdminMenu = true
-
-	if VoteMenu.Visible and VoteMenu.ActivePage == "Main" then
-		VoteMenu:AddAdminMenuButton()
-		VoteMenu:SortSideButtons( true )
-	end
+Shine.HookNetworkMessage( "Shine_AuthAdminMenu", function( Data )
+	VoteMenu.CanViewAdminMenu = Data.CanUseAdminMenu
 end )

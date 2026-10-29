@@ -4,438 +4,178 @@
 
 local Shine = Shine
 
-local IsType = Shine.IsType
-local Notify = Shared.Message
-local pairs = pairs
 local rawget = rawget
-local setmetatable = setmetatable
-local StringFormat = string.format
-local type = type
-
-local function Print( ... )
-	return Notify( StringFormat( ... ) )
-end
-
-local ClientConfigPath = "config://shine/cl_plugins/"
+local TableEmpty = table.Empty
+local TableQuickCopy = table.QuickCopy
+local TableShallowMerge = table.ShallowMerge
 
 local PluginMeta = {}
 Shine.BasePlugin = PluginMeta
+
+-- Modules are static mixins that are applied to the base plugin.
+PluginMeta.Modules = {}
+
+function PluginMeta:GetName()
+	return self.__Name
+end
 
 --[[
 	Base initialise, just enables the plugin, nothing more.
 	Override to add to it.
 ]]
 function PluginMeta:Initialise()
+	self:BroadcastModuleEvent( "Initialise" )
 	self.Enabled = true
 
 	return true
 end
 
 --[[
-	Adds a variable to the plugin's data table.
-
-	Inputs:
-		Type - The network variable's type, e.g "string (128)".
-		Name - The name on the data table to give this variable.
-		Default - The default value.
-		Access - Optional access string, if set,
-		only clients with access to this will receive this variable.
+	Indicates whether the plugin has been previously enabled.
+	This assumes the plugin isn't touching its Enabled field before initialisation.
 ]]
-function PluginMeta:AddDTVar( Type, Name, Default, Access )
-	self.DTVars = self.DTVars or {}
-	self.DTVars.Keys = self.DTVars.Keys or {}
-	self.DTVars.Defaults = self.DTVars.Defaults or {}
-	self.DTVars.Access = self.DTVars.Access or {}
-
-	self.DTVars.Keys[ Name ] = Type
-	self.DTVars.Defaults[ Name ] = Default
-	self.DTVars.Access[ Name ] = Access
+function PluginMeta:IsFirstTimeLoaded()
+	return self.Enabled == nil
 end
 
---[[
-	Do not call directly, this is used to finalise the data table after setup.
-]]
-function PluginMeta:InitDataTable( Name )
-	if not self.DTVars then return end
-
-	self.dt = Shine:CreateDataTable( "Shine_DT_"..Name, self.DTVars.Keys,
-		self.DTVars.Defaults, self.DTVars.Access )
-
-	if self.NetworkUpdate then
-		self.dt:__SetChangeCallback( self, self.NetworkUpdate )
+local function InitialiseModules( self )
+	local Modules = rawget( self, "Modules" )
+	if not Modules then
+		Modules = {}
+		self.Modules = Modules
 	end
-
-	self.DTVars = nil
+	return Modules
 end
 
---[[
-	Adds a network message to the plugin.
-
-	Calls Plugin:Receive<Name>( Client, Data ) if receiving on the server side,
-	or Plugin:Receive<Name>( Data ) if receiving on the client side.
-
-	Call this function inside shared.lua -> Plugin:SetupDataTable().
-]]
-function PluginMeta:AddNetworkMessage( Name, Params, Receiver )
-	self.__NetworkMessages = rawget( self, "__NetworkMessages" ) or {}
-
-	Shine.Assert( not self.__NetworkMessages[ Name ],
-		"Attempted to register network message %s for plugin %s twice!", Name, self.__Name )
-
-	local MessageName = StringFormat( "SH_%s_%s", self.__Name, Name )
-	local FuncName = StringFormat( "Receive%s", Name )
-
-	self.__NetworkMessages[ Name ] = MessageName
-
-	Shared.RegisterNetworkMessage( MessageName, Params )
-
-	if Receiver == "Server" and Server then
-		Server.HookNetworkMessage( MessageName, function( Client, Data )
-			self[ FuncName ]( self, Client, Data )
-		end )
-	elseif Receiver == "Client" and Client then
-		Client.HookNetworkMessage( MessageName, function( Data )
-			self[ FuncName ]( self, Data )
-		end )
-	end
-end
-
-if Server then
-	--[[
-		Sends an internal plugin network message.
-
-		Inputs:
-			Name - Message name that was registered.
-			Targets - Table of clients, a single client, or nil to send to everyone.
-			Data - Message data.
-			Reliable - Boolean whether to ensure the message reaches its target(s).
-	]]
-	function PluginMeta:SendNetworkMessage( Target, Name, Data, Reliable )
-		local MessageName = self.__NetworkMessages[ Name ]
-
-		Shine:ApplyNetworkMessage( Target, MessageName, Data, Reliable )
-	end
-elseif Client then
-	function PluginMeta:SendNetworkMessage( Name, Data, Reliable )
-		local MessageName = self.__NetworkMessages[ Name ]
-
-		Shine.SendNetworkMessage( MessageName, Data, Reliable )
-	end
-end
-
-function PluginMeta:GenerateDefaultConfig( Save )
-	self.Config = self.DefaultConfig
-
-	if Save then
-		local Path = Server and Shine.Config.ExtensionDir..self.ConfigName
-			or ClientConfigPath..self.ConfigName
-
-		local Success, Err = Shine.SaveJSONFile( self.Config, Path )
-
-		if not Success then
-			Print( "Error writing %s config file: %s", self.__Name, Err )
-
-			return
-		end
-
-		Print( "Shine %s config file created.", self.__Name )
-	end
-end
-
-function PluginMeta:SaveConfig( Silent )
-	local Path = Server and ( rawget( self, "__ConfigPath" )
-		or Shine.Config.ExtensionDir..self.ConfigName ) or ClientConfigPath..self.ConfigName
-
-	local Success, Err = Shine.SaveJSONFile( self.Config, Path )
-
-	if not Success then
-		Print( "Error writing %s config file: %s", self.__Name, Err )
-
-		return
-	end
-
-	if not self.SilentConfigSave and not Silent then
-		Print( "Shine %s config file updated.", self.__Name )
-	end
-end
-
-function PluginMeta:LoadConfig()
-	local PluginConfig
-	local Path = Server and Shine.Config.ExtensionDir..self.ConfigName
-		or ClientConfigPath..self.ConfigName
-
-	local Err
-	local Pos
-
-	if Server then
-		local Gamemode = Shine.GetGamemode()
-
-		--Look for gamemode specific config file.
-		if Gamemode ~= Shine.BaseGamemode then
-			local Paths = {
-				StringFormat( "%s%s/%s", Shine.Config.ExtensionDir, Gamemode, self.ConfigName ),
-				Path
-			}
-
-			for i = 1, #Paths do
-				local File, ErrPos, ErrString = Shine.LoadJSONFile( Paths[ i ] )
-
-				if File then
-					PluginConfig = File
-
-					self.__ConfigPath = Paths[ i ]
-
-					break
-				elseif IsType( ErrPos, "number" ) then
-					Err = ErrString
-					Pos = ErrPos
-				end
-			end
-		else
-			PluginConfig, Pos, Err = Shine.LoadJSONFile( Path )
-		end
-	else
-		PluginConfig, Pos, Err = Shine.LoadJSONFile( Path )
-	end
-
-	if not PluginConfig or not IsType( PluginConfig, "table" ) then
-		if IsType( Pos, "string" ) then
-			self:GenerateDefaultConfig( true )
-		else
-			Print( "Invalid JSON for %s plugin config, loading default...", self.__Name )
-
-			self.Config = self.DefaultConfig
-		end
-
-		return
-	end
-
-	self.Config = PluginConfig
-
-	local NeedsSave
-
-	if self.CheckConfig and Shine.CheckConfig( self.Config, self.DefaultConfig ) then
-		NeedsSave = true
-	end
-
-	if self.CheckConfigTypes and self:TypeCheckConfig() then
-		NeedsSave = true
-	end
-
-	if NeedsSave then
-		self:SaveConfig()
-	end
-end
-
-function PluginMeta:TypeCheckConfig()
-	local Config = self.Config
-	local DefaultConfig = self.DefaultConfig
-
-	local Edited
-
-	for Key, Value in pairs( Config ) do
-		local ExpectedType = type( DefaultConfig[ Key ] )
-		local RealType = type( Value )
-
-		if ExpectedType ~= RealType then
-			Print( "Type mis-match in %s config for key '%s', expected type: '%s'. Reverting value to default.",
-				self.__Name, Key, ExpectedType )
-
-			Config[ Key ] = DefaultConfig[ Key ]
-			Edited = true
-		end
-	end
-
-	return Edited
-end
-
-if Server then
-	--[[
-		Bind a command to the plugin.
-		If you call the base class Cleanup, the command will be removed on plugin unload.
-	]]
-	function PluginMeta:BindCommand( ConCommand, ChatCommand, Func, NoPerm, Silent )
-		self.Commands = rawget( self, "Commands" ) or {}
-
-		local Command  = Shine:RegisterCommand( ConCommand, ChatCommand, Func, NoPerm, Silent )
-
-		self.Commands[ ConCommand ] = Command
-
-		return Command
-	end
-
-	--[[
-		Default cleanup will remove any bound commands.
-		Override to add/change behaviour, call it with self.BaseClass.Cleanup( self ).
-	]]
-	function PluginMeta:Cleanup()
-		if rawget( self, "Commands" ) then
-			for Key, Command in pairs( self.Commands ) do
-				Shine:RemoveCommand( Command.ConCmd, Command.ChatCmd )
-				self.Commands[ Key ] = nil
-			end
-		end
-
-		self:DestroyAllTimers()
-	end
-elseif Client then
-	function PluginMeta:BindCommand( ConCommand, Func )
-		self.Commands = rawget( self, "Commands" ) or {}
-
-		local Command = Shine:RegisterClientCommand( ConCommand, Func )
-
-		self.Commands[ ConCommand ] = Command
-
-		return Command
-	end
-
-	function PluginMeta:AddAdminMenuCommand( Category, Name, Command, MultiSelect, DoClick, Tooltip )
-		self.AdminMenuCommands = rawget( self, "AdminMenuCommands" ) or {}
-		self.AdminMenuCommands[ Category ] = true
-
-		Shine.AdminMenu:AddCommand( Category, Name, Command, MultiSelect, DoClick, Tooltip )
-	end
-
-	function PluginMeta:AddAdminMenuTab( Name, Data )
-		self.AdminMenuTabs = rawget( self, "AdminMenuTabs" ) or {}
-		self.AdminMenuTabs[ Name ] = true
-
-		Shine.AdminMenu:AddTab( Name, Data )
-	end
-
-	function PluginMeta:Cleanup()
-		if rawget( self, "Commands" ) then
-			for Key, Command in pairs( self.Commands ) do
-				Shine:RemoveClientCommand( Command.ConCmd, Command.ChatCmd )
-				self.Commands[ Key ] = nil
-			end
-		end
-
-		self:DestroyAllTimers()
-
-		if rawget( self, "AdminMenuCommands" ) then
-			for Category in pairs( self.AdminMenuCommands ) do
-				Shine.AdminMenu:RemoveCommandCategory( Category )
-			end
-		end
-
-		if rawget( self, "AdminMenuTabs" ) then
-			for Tab in pairs( self.AdminMenuTabs ) do
-				Shine.AdminMenu:RemoveTab( Tab )
-			end
-		end
+local function FlushEventDispatcher( self )
+	local Dispatcher = rawget( self, "EventDispatcher" )
+	if Dispatcher then
+		Dispatcher:FlushCache()
 	end
 end
 
 --[[
-	Creates a timer and adds it to the list of timers associated to the plugin.
-	These timers are removed when the plugin unloads in the base Cleanup method.
+	*STATIC* method to register a module against the plugin.
 
-	Inputs: Same as Shine.Timer.Create.
+	Modules are small self-contained bits of behaviour that split up distinct pieces of functionality
+	in a plugin.
+
+	The base plugin loads its modules from core/shared/base_plugin. Plugin instances receive
+	a copy of their parent's modules, which they can then add to.
 ]]
-function PluginMeta:CreateTimer( Name, Delay, Reps, Func )
-	self.Timers = rawget( self, "Timers" ) or setmetatable( {}, { __mode = "v" } )
+function PluginMeta:AddModule( Module )
+	local Modules = InitialiseModules( self )
+	Modules[ #Modules + 1 ] = Module
+	TableShallowMerge( Module, self )
 
-	local RealName = StringFormat( "%s_%s", self.__Name, Name )
-	local Timer = Shine.Timer.Create( RealName, Delay, Reps, Func )
+	-- Merge configuration values if provided.
+	if Module.DefaultConfig and self.DefaultConfig ~= Module.DefaultConfig then
+		TableShallowMerge( Module.DefaultConfig, self.DefaultConfig )
+	end
 
-	self.Timers[ Name ] = Timer
+	-- Merge any configuration validation rules.
+	if Module.ConfigValidator and self.ConfigValidator
+	and self.ConfigValidator ~= Module.ConfigValidator then
+		self.ConfigValidator:Add( Module.ConfigValidator )
+	end
 
-	return Timer
+	FlushEventDispatcher( self )
 end
 
 --[[
-	Creates a simple timer and adds it to the list of timers associated to the plugin.
-	Inputs: Same as Shine.Timer.Simple.
+	Internal function, do not call!
+
+	Adds the given modules beneath the current modules.
+	Used to inherit modules.
 ]]
-function PluginMeta:SimpleTimer( Delay, Func )
-	self.Timers = rawget( self, "Timers" ) or setmetatable( {}, { __mode = "v" } )
+function PluginMeta:AddBaseModules( BaseModules )
+	local Modules = InitialiseModules( self )
+	local ExistingModules = TableQuickCopy( Modules )
 
-	local Timer = Shine.Timer.Simple( Delay, Func )
+	TableEmpty( Modules )
 
-	self.Timers[ Timer.Name ] = Timer
+	for i = 1, #BaseModules do
+		Modules[ i ] = BaseModules[ i ]
+	end
+	for i = 1, #ExistingModules do
+		Modules[ #Modules + 1 ] = ExistingModules[ i ]
+	end
 
-	return Timer
+	FlushEventDispatcher( self )
 end
 
-function PluginMeta:GetTimer( Name )
-	if not rawget( self, "Timers" ) or not self.Timers[ Name ] then return nil end
+--[[
+	Internal function, do not call!
 
-	return self.Timers[ Name ]
-end
+	Sets up the event dispatcher for sending events to plugin modules.
+]]
+function PluginMeta:SetupDispatcher()
+	self.EventDispatcher = Shine.TrackingEventDispatcher( self.Modules )
 
-function PluginMeta:GetTimers()
-	return rawget( self, "Timers" )
-end
-
-function PluginMeta:TimerExists( Name )
-	return Shine.Timer.Exists( StringFormat( "%s_%s", self.__Name, Name ) )
-end
-
-function PluginMeta:PauseTimer( Name )
-	if not rawget( self, "Timers" ) or not self.Timers[ Name ] then return end
-
-	self.Timers[ Name ]:Pause()
-end
-
-function PluginMeta:ResumeTimer( Name )
-	if not rawget( self, "Timers" ) or not self.Timers[ Name ] then return end
-
-	self.Timers[ Name ]:Resume()
-end
-
-function PluginMeta:DestroyTimer( Name )
-	if not rawget( self, "Timers" ) or not self.Timers[ Name ] then return end
-
-	self.Timers[ Name ]:Destroy()
-
-	self.Timers[ Name ] = nil
-end
-
-function PluginMeta:DestroyAllTimers()
-	if rawget( self, "Timers" ) then
-		for Name, Timer in pairs( self.Timers ) do
-			Timer:Destroy()
-			self.Timers[ Name ] = nil
-		end
+	local Plugin = self
+	-- Call module events with self being the plugin.
+	function self.EventDispatcher:CallEvent( Module, Method, ... )
+		return Method( Plugin, ... )
 	end
 end
 
---Suspends the plugin, stopping its hooks, pausing its timers, but not calling Cleanup().
+--[[
+	Calls an event on all modules that have a listener for it,
+	returning the values from the first module to return a value.
+]]
+function PluginMeta:CallModuleEvent( Event, ... )
+	return self.EventDispatcher:DispatchEvent( Event, ... )
+end
+
+--[[
+	Calls an event on all modules that have a listener for it
+	without stopping if a module returns a value.
+]]
+function PluginMeta:BroadcastModuleEvent( Event, ... )
+	self.EventDispatcher:BroadcastEvent( Event, ... )
+end
+
+--[[
+	Returns true if the given module event has been fired.
+]]
+function PluginMeta:HasFiredModuleEvent( Event )
+	return self.EventDispatcher:HasFiredEvent( Event )
+end
+
+--[[
+	Resets the history of module events.
+]]
+function PluginMeta:ResetModuleEventHistory()
+	self.EventDispatcher:ResetHistory()
+end
+
+--[[
+	Default cleanup will remove any bound commands.
+	Override to add/change behaviour, call it with self.BaseClass.Cleanup( self ).
+]]
+function PluginMeta:Cleanup()
+	self:BroadcastModuleEvent( "Cleanup" )
+end
+
+--[[
+	Suspends the plugin, stopping its hooks, pausing its timers, but not calling Cleanup().
+]]
 function PluginMeta:Suspend()
 	if self.OnSuspend then
 		self:OnSuspend()
 	end
 
-	if rawget( self, "Timers" ) then
-		for Name, Timer in pairs( self.Timers ) do
-			Timer:Pause()
-		end
-	end
-
-	if rawget( self, "Commands" ) then
-		for Key, Command in pairs( self.Commands ) do
-			Command.Disabled = true
-		end
-	end
+	self:BroadcastModuleEvent( "Suspend" )
 
 	self.Enabled = false
 	self.Suspended = true
 end
 
---Resumes the plugin from suspension.
+--[[
+	Resumes the plugin from suspension.
+]]
 function PluginMeta:Resume()
-	if rawget( self, "Timers" ) then
-		for Name, Timer in pairs( self.Timers ) do
-			Timer:Resume()
-		end
-	end
-
-	if rawget( self, "Commands" ) then
-		for Key, Command in pairs( self.Commands ) do
-			Command.Disabled = nil
-		end
-	end
+	self:BroadcastModuleEvent( "Resume" )
 
 	self.Enabled = true
 	self.Suspended = nil
@@ -445,7 +185,9 @@ function PluginMeta:Resume()
 	end
 end
 
---Provides an easy way to delay actions in think-esque hooks.
+--[[
+	Provides an easy way to delay actions in think-esque hooks.
+]]
 function PluginMeta:CanRunAction( Action, Time, Delay )
 	self.TimedActions = rawget( self, "TimedActions" ) or {}
 
@@ -456,28 +198,46 @@ function PluginMeta:CanRunAction( Action, Time, Delay )
 	return true
 end
 
+do
+	local ErrorHandler = Shine.BuildErrorHandler( "Plugin callback error" )
+	local xpcall = xpcall
+
+	local function UnwrapResults( Success, ... )
+		if not Success then
+			return
+		end
+		return ...
+	end
+
+	--[[
+		Wraps a callback so that it is only executed if the plugin is still enabled.
+	]]
+	function PluginMeta:WrapCallback( Callback )
+		return function( ... )
+			if not self.Enabled then return end
+
+			return UnwrapResults( xpcall( Callback, ErrorHandler, ... ) )
+		end
+	end
+end
+
 local ReservedKeys = {
 	Enabled = true,
 	Suspended = true
 }
---Support plugins inheriting from other plugins.
 function PluginMeta:__index( Key )
 	if ReservedKeys[ Key ] then return nil end
-	if PluginMeta[ Key ] then return PluginMeta[ Key ] end
 
+	-- Inherit fields dynamically if they pass the inheritance predicate.
 	local Inherit = rawget( self, "__Inherit" )
-
-	if Inherit then
-		local InheritBlacklist = rawget( self, "__InheritBlacklist" )
-		local InheritWhitelist = rawget( self, "__InheritWhitelist" )
-
-		if not InheritBlacklist and not InheritWhitelist then
-			return Inherit[ Key ]
+	if Inherit and rawget( self, "__CanInherit" )( Key ) then
+		local Value = Inherit[ Key ]
+		if Value ~= nil then
+			return Value
 		end
-
-		if InheritBlacklist and InheritBlacklist[ Key ] then return nil end
-		if InheritWhitelist and not InheritWhitelist[ Key ] then return nil end
-
-		return Inherit[ Key ]
 	end
+
+	return PluginMeta[ Key ]
 end
+
+Shine.LoadScriptsByPath( "lua/shine/core/shared/base_plugin" )

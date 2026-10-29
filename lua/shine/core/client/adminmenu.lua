@@ -5,201 +5,369 @@
 local Shine = Shine
 local SGUI = Shine.GUI
 local Hook = Shine.Hook
+local Locale = Shine.Locale
+
+local Units = SGUI.Layout.Units
+local Percentage = Units.Percentage
+local Spacing = Units.Spacing
+local UnitVector = Units.UnitVector
+local HighResScaled = Units.HighResScaled
 
 local IsType = Shine.IsType
 local StringFormat = string.format
-local TableConcat = table.concat
+local TableSort = table.sort
 
 Shine.AdminMenu = {}
 
 local AdminMenu = Shine.AdminMenu
+SGUI:AddMixin( AdminMenu, "Visibility" )
 
-Hook.Add( "OnMapLoad", "AdminMenu_Hook", function()
-	Hook.SetupGlobalHook( "Scoreboard_OnClientDisconnect", "OnClientIDDisconnect", "PassivePre" )
-end )
+do
+	local ErrorHandler = Shine.BuildErrorHandler( "Admin menu creation error" )
+	local xpcall = xpcall
 
-Client.HookNetworkMessage( "Shine_AdminMenu_Open", function( Data )
-	AdminMenu:SetIsVisible( true )
-end )
+	Shine.HookNetworkMessage( "Shine_AdminMenu_Open", function( Data )
+		local WasVisible = AdminMenu.Visible
+		if xpcall( AdminMenu.Show, ErrorHandler, AdminMenu ) then
+			if not WasVisible and AdminMenu.Visible then
+				Hook.Broadcast( "OnAdminMenuOpened", AdminMenu )
+			elseif WasVisible and AdminMenu.Visible and SGUI.IsValid( AdminMenu.Window ) then
+				-- Bring the menu forward if it's already open in case it was lost behind another window.
+				SGUI:SetWindowFocus( AdminMenu.Window )
+			end
+		end
+	end )
+end
+
+AdminMenu.SystemTabPosition = table.AsEnum{
+	"START", "END"
+}
 
 AdminMenu.Commands = {}
 AdminMenu.Tabs = {}
+AdminMenu.SystemTabs = {}
+for i = 1, #AdminMenu.SystemTabPosition do
+	AdminMenu.SystemTabs[ AdminMenu.SystemTabPosition[ i ] ] = {}
+end
 
-AdminMenu.Pos = Vector( -400, -300, 0 )
-AdminMenu.Size = Vector( 800, 600, 0 )
+AdminMenu.DefaultSize = Vector( 930, 700, 0 )
 
 function AdminMenu:Create()
 	self.Created = true
 
 	local Window = SGUI:Create( "TabPanel" )
+	Window:SetDebugName( "AdminMenuWindow" )
 	Window:SetAnchor( "CentreMiddle" )
+
+	local Size = Vector2(
+		Units.Integer( HighResScaled( self.DefaultSize.x ) ):GetValue(),
+		Units.Integer( HighResScaled( self.DefaultSize.y ) ):GetValue()
+	)
+
+	self.Size = Size
+	self.Pos = -Size * 0.5
+
+	Window:SetSize( Size )
 	Window:SetPos( self.Pos )
-	Window:SetSize( self.Size )
+
+	Window:SetVerticalLayoutMode( Window.VerticalLayoutModeType.COMPACT )
+	Window:UseAutoTabWidth()
+	Window:SetTabHeight( Units.Integer( HighResScaled( 40 ) ):GetValue() )
+	Window:SetFontScale( SGUI.FontManager.GetHighResFont( "kAgencyFB", 27 ) )
+
+	Window:CallOnRemove( function()
+		if self.IgnoreRemove then return end
+
+		if self.Visible then
+			-- Make sure mouse is disabled in case of error.
+			SGUI:EnableMouse( false )
+			self.Visible = false
+		end
+
+		self.Created = false
+		self.Window = nil
+	end )
+
+	Window:SetExpanded( Shine.Config.ExpandAdminMenuTabs )
+	Window:AddPropertyChangeListener( "Expanded", function( Window, Expanded )
+		Shine:SetClientSetting( "ExpandAdminMenuTabs", Expanded )
+	end )
 
 	self.Window = Window
 
 	Window.OnPreTabChange = function( Window )
-		if not Window.ActiveTab then return end
-
-		local Tab = Window.Tabs[ Window.ActiveTab ]
-
+		local Tab = Window:GetActiveTab()
 		if not Tab then return end
 
-		self:OnTabCleanup( Window, Tab.Name )
+		self:OnTabCleanup( Window, Tab )
 	end
 
+	Window.TitleBarHeight = HighResScaled( 24 ):GetValue()
 	self:PopulateTabs( Window )
 
 	Window:AddCloseButton()
 	Window.OnClose = function()
-		self:SetIsVisible( false )
-
-		if self.ToDestroyOnClose then
-			for Panel in pairs( self.ToDestroyOnClose ) do
-				Panel:Destroy()
-				self.ToDestroyOnClose[ Panel ] = nil
-			end
-		end
-
+		self:Close()
 		return true
 	end
+
+	Window:SetBoxShadow( {
+		BlurRadius = HighResScaled( 16 ):GetValue(),
+		Colour = Colour( 0, 0, 0, 0.75 )
+	} )
+end
+
+function AdminMenu:Close( Now )
+	if not self.Visible then return end
+
+	self:ForceHide( Now )
+
+	if self.ToDestroyOnClose then
+		for Panel in self.ToDestroyOnClose:Iterate() do
+			if Panel:IsValid() then
+				Panel:Destroy()
+			end
+		end
+		self.ToDestroyOnClose:Clear()
+	end
+
+	if self.Modals then
+		for Modal in self.Modals:Iterate() do
+			if Modal:IsValid() then
+				Modal:Close()
+			end
+		end
+		self.Modals:Clear()
+	end
+
+	Hook.Broadcast( "OnAdminMenuClosed", self )
+end
+
+Shine.Hook.Add( "OnResolutionChanged", "AdminMenu_OnResolutionChanged", function()
+	if not AdminMenu.Created then return end
+
+	-- Close and destroy the menu, it'll be scaled correctly the next time it opens.
+	AdminMenu:Close( true )
+	AdminMenu.IgnoreRemove = true
+	AdminMenu.Window:Destroy()
+	AdminMenu.IgnoreRemove = false
+	AdminMenu.Window = nil
+	AdminMenu.Created = false
+end )
+
+function AdminMenu:AttachModal( Modal )
+	self.Modals = self.Modals or Shine.UnorderedSet()
+	self.Modals:Add( Modal )
+end
+
+function AdminMenu:DetachModal( Modal )
+	if not self.Modals then return end
+
+	self.Modals:Remove( Modal )
 end
 
 function AdminMenu:DestroyOnClose( Object )
-	self.ToDestroyOnClose = self.ToDestroyOnClose or {}
-
-	self.ToDestroyOnClose[ Object ] = true
+	self.ToDestroyOnClose = self.ToDestroyOnClose or Shine.UnorderedSet()
+	self.ToDestroyOnClose:Add( Object )
 end
 
 function AdminMenu:DontDestroyOnClose( Object )
 	if not self.ToDestroyOnClose then return end
 
-	self.ToDestroyOnClose[ Object ] = nil
+	self.ToDestroyOnClose:Remove( Object )
 end
 
 AdminMenu.EasingTime = 0.25
 
-function AdminMenu:SetIsVisible( Bool )
+function AdminMenu.AnimateVisibility( Window, Show, Visible, EasingTime, TargetPos, IgnoreAnim )
+	local IsAnimated = Shine.Config.AnimateUI and not IgnoreAnim
+
+	if not Show and IsAnimated then
+		Shine.Timer.Simple( EasingTime, function()
+			if not SGUI.IsValid( Window ) then return end
+			Window:SetIsVisible( false )
+		end )
+	else
+		Window:SetIsVisible( Show )
+	end
+
+	if Show and not Visible then
+		if IsAnimated then
+			Window:SetPos( Vector2( -Client.GetScreenWidth() + TargetPos.x, TargetPos.y ) )
+			Window:MoveTo( nil, nil, TargetPos, 0, EasingTime )
+		else
+			Window:SetPos( TargetPos )
+		end
+
+		SGUI:EnableMouse( true )
+	elseif not Show and Visible then
+		SGUI:EnableMouse( false )
+
+		if IsAnimated then
+			Window:MoveTo( nil, nil, Vector2( Client.GetScreenWidth() - TargetPos.x, TargetPos.y ), 0,
+				EasingTime, nil, math.EaseIn )
+		end
+	end
+end
+
+function AdminMenu:SetIsVisible( Bool, IgnoreAnim )
 	if not self.Created then
 		self:Create()
 	end
 
-	if not Bool and Shine.Config.AnimateUI then
-		Shine.Timer.Simple( self.EasingTime, function()
-			if not SGUI.IsValid( self.Window ) then return end
-			self.Window:SetIsVisible( false )
-		end )
-	else
-		self.Window:SetIsVisible( Bool )
-	end
-
-	if Bool and not self.Visible then
-		if Shine.Config.AnimateUI then
-			self.Window:SetPos( Vector( -Client.GetScreenWidth() + self.Pos.x, self.Pos.y, 0 ) )
-			self.Window:MoveTo( nil, nil, self.Pos, 0, self.EasingTime )
-		else
-			self.Window:SetPos( self.Pos )
-		end
-
-		SGUI:EnableMouse( true )
-	elseif not Bool and self.Visible then
-		SGUI:EnableMouse( false )
-
-		if Shine.Config.AnimateUI then
-			self.Window:MoveTo( nil, nil, Vector( Client.GetScreenWidth() - self.Pos.x, self.Pos.y, 0 ), 0,
-				self.EasingTime, nil, math.EaseIn )
-		end
-	end
-
+	self.AnimateVisibility( self.Window, Bool, self.Visible, self.EasingTime, self.Pos, IgnoreAnim )
 	self.Visible = Bool
 end
+
+function AdminMenu:GetIsVisible()
+	return self.Visible or false
+end
+
+AdminMenu:BindVisibilityToEvents( "OnHelpScreenDisplay", "OnHelpScreenHide" )
 
 function AdminMenu:PlayerKeyPress( Key, Down )
 	if not self.Visible then return end
 
-	if Key == InputKey.Escape and Down then
-		self:SetIsVisible( false )
+	if ( Key == InputKey.Escape or GetIsBinding( Key, "Use" ) ) and Down then
+		self:Close()
 
-		return true
+		return Key == InputKey.Escape or nil
 	end
 end
 
 Hook.Add( "PlayerKeyPress", "AdminMenu_KeyPress", function( Key, Down )
-	AdminMenu:PlayerKeyPress( Key, Down )
+	return AdminMenu:PlayerKeyPress( Key, Down )
 end, 1 )
 
-function AdminMenu:AddTab( Name, Data )
-	self.Tabs[ Name ] = Data
+-- Close when logging in/out of a command structure to avoid mouse problems.
+Hook.Add( "OnCommanderLogout", "AdminMenuLogout", function()
+	AdminMenu:Close()
+end )
+Hook.Add( "OnCommanderLogin", "AdminMenuLogin", function()
+	AdminMenu:Close()
+end )
 
-	if self.Created then
-		local Tabs = self.Window.Tabs
+local function RefreshTabsIfNeeded( self )
+	if not self.Created then return end
 
-		--A bit brute force, but its the easiest way to preserve tab order.
-		for i = 1, self.Window.NumTabs do
-			self.Window:RemoveTab( 1 )
+	local ActiveTab = self.Window:GetActiveTab()
+	local Tabs = self.Window.Tabs
+
+	-- A bit brute force, but its the easiest way to preserve tab order.
+	for i = 1, self.Window.NumTabs do
+		self.Window:RemoveTab( 1 )
+	end
+
+	self:PopulateTabs( self.Window )
+
+	local WindowTabs = self.Window.Tabs
+	for i = 1, #WindowTabs do
+		local Tab = WindowTabs[ i ]
+		if Tab.Name == ActiveTab.Name then
+			Tab.TabButton:DoClick()
+			break
 		end
-
-		self:PopulateTabs( self.Window )
 	end
 end
 
+--[[
+	Adds a standard tab to the admin menu.
+
+	This should be used by plugins and anything that may wish to later remove the tab.
+]]
+function AdminMenu:AddTab( Name, TabDefinition )
+	self.Tabs[ Name ] = TabDefinition
+	RefreshTabsIfNeeded( self )
+end
+
+--[[
+	Adds a system tab to the admin menu.
+
+	System tabs are permanent and cannot be removed. They also position themselves around the dynamic tabs to remain
+	in a fixed position (either at the start or end of the tab list).
+]]
+function AdminMenu:AddSystemTab( Name, TabDefinition )
+	local Tabs = self.SystemTabs[ TabDefinition.Position or self.SystemTabPosition.END ]
+	Shine.AssertAtLevel( Tabs, "Unknown system tab position type: %s", 3, TabDefinition.Position )
+
+	Tabs[ #Tabs + 1 ] = { Name = Name, TabDefinition = TabDefinition }
+
+	TableSort( Tabs, function( A, B )
+		local LeftPrecedence = A.TabDefinition.Precedence or 0
+		local RightPrecedence = B.TabDefinition.Precedence or 0
+
+		if LeftPrecedence == RightPrecedence then
+			return A.Name < B.Name
+		end
+
+		return LeftPrecedence < RightPrecedence
+	end )
+
+	RefreshTabsIfNeeded( self )
+end
+
 function AdminMenu:RemoveTab( Name )
-	local Data = self.Tabs[ Name ]
+	local TabDefinition = self.Tabs[ Name ]
+	if not TabDefinition then return end
 
-	if not Data then return end
-
-	--Remove the actual menu tab.
-	if Data.TabObj and SGUI.IsValid( Data.TabObj.TabButton ) then
-		self.Window:RemoveTab( Data.TabObj.TabButton.Index )
+	-- Remove the actual menu tab.
+	if TabDefinition.TabObj and SGUI.IsValid( TabDefinition.TabObj.TabButton ) then
+		self.Window:RemoveTab( TabDefinition.TabObj.TabButton.Index )
 	end
 
 	self.Tabs[ Name ] = nil
+end
+
+local function AddTab( Window, Name, TabDefinition )
+	local DisplayName = Name
+	if TabDefinition.TranslationKey then
+		DisplayName = Locale:GetPhrase( TabDefinition.TranslationSource or "Core", TabDefinition.TranslationKey )
+	end
+
+	local Tab = Window:AddTab( DisplayName, function( Panel )
+		TabDefinition.OnInit( Panel, TabDefinition.Data )
+		TabDefinition.Initialised = true
+	end, TabDefinition.Icon )
+
+	Tab.TabButton:SetDebugName( StringFormat( "AdminMenu%sTab", Name ) )
+
+	TabDefinition.TabObj = Tab
+	Tab.TabDefinition = TabDefinition
 end
 
 function AdminMenu:PopulateTabs( Window )
 	local CommandsTab = self.Tabs.Commands
 	local AboutTab = self.Tabs.About
 
-	local Tab = Window:AddTab( "Commands", function( Panel )
-		CommandsTab.OnInit( Panel, CommandsTab.Data )
-	end )
-	CommandsTab.TabObj = Tab
-
-	--Remove them here so they're not in the pairs loop.
-	self.Tabs.Commands = nil
-	self.Tabs.About = nil
-
-	for Name, Data in SortedPairs( self.Tabs ) do
-		local Tab = Window:AddTab( Name, function( Panel )
-			Data.OnInit( Panel, Data.Data )
-		end )
-		Data.TabObj = Tab
+	local StartTabs = self.SystemTabs[ self.SystemTabPosition.START ]
+	for i = 1, #StartTabs do
+		local Tab = StartTabs[ i ]
+		AddTab( Window, Tab.Name, Tab.TabDefinition )
 	end
 
-	--Add them back.
-	self.Tabs.Commands = CommandsTab
-	self.Tabs.About = AboutTab
+	for Name, TabDefinition in SortedPairs( self.Tabs ) do
+		AddTab( Window, Name, TabDefinition )
+	end
 
-	Tab = Window:AddTab( "About", function( Panel )
-		AboutTab.OnInit( Panel )
-	end )
-	AboutTab.TabObj = Tab
+	local EndTabs = self.SystemTabs[ self.SystemTabPosition.END ]
+	for i = 1, #EndTabs do
+		local Tab = EndTabs[ i ]
+		AddTab( Window, Tab.Name, Tab.TabDefinition )
+	end
 end
 
-function AdminMenu:OnTabCleanup( Window, Name )
-	local Tab = self.Tabs[ Name ]
+function AdminMenu:OnTabCleanup( Window, Tab )
+	local TabDefinition = Tab.TabDefinition
+	if not TabDefinition or not TabDefinition.Initialised then return end
 
-	if not Tab then return end
-
-	local OnCleanup = Tab.OnCleanup
-
+	local OnCleanup = TabDefinition.OnCleanup
 	if not OnCleanup then return end
 
 	local Ret = OnCleanup( Window.ContentPanel )
-
 	if Ret then
-		Tab.Data = Ret
+		TabDefinition.Data = Ret
 	end
+	TabDefinition.Initialised = false
 end
 
 function AdminMenu.GetListState( List )
@@ -261,18 +429,38 @@ function AdminMenu.RestoreListState( List, Data )
 	return Data.SortedColumn ~= nil
 end
 
---Setup the commands tab.
+function AdminMenu.SetupListWithScaling( List )
+	List:SetLineSize( HighResScaled( 32 ):GetValue() )
+	List:SetHeaderSize( List.LineSize )
+
+	local Font, Scale = SGUI.FontManager.GetHighResFont( "kAgencyFB", 27 )
+	List:SetHeaderFontScale( Font, Scale )
+	List:SetRowFontScale( Font, Scale )
+
+	List:SetScrollbarWidth( HighResScaled( 10 ):GetValue() )
+end
+
+-- Setup the commands tab.
 do
+	local Easing = require "shine/lib/gui/util/easing"
+
 	local GetEnts = Shared.GetEntitiesWithClassname
 	local IterateEntList = ientitylist
+	local StringGSub = string.gsub
 	local TableEmpty = table.Empty
+	local TableFindByField = table.FindByField
 	local TableRemove = table.remove
 	local TableSort = table.sort
 
 	local Label
 	local PlayerList
 	local Commands
+	local CommandsListWidth
 	local Rows = {}
+	local RowPosTransition = {
+		Duration = 0.15,
+		EasingFunction = Easing.GetEaser( "OutSine" )
+	}
 
 	local function AddPlayerToList( Ent )
 		local Row = Rows[ Ent.clientId ]
@@ -285,74 +473,123 @@ do
 			return
 		end
 
-		Rows[ Ent.clientId ] = PlayerList:AddRow( Ent.playerName, Ent.steamId,
-			Shine:GetTeamName( Ent.teamNumber, true ) )
+		Row = PlayerList:AddRow( Ent.playerName, Ent.steamId, Shine:GetTeamName( Ent.teamNumber, true ) )
+		Row:SetDebugName( "AdminMenuPlayerRow"..Ent.clientId )
+
+		Rows[ Ent.clientId ] = Row
 	end
 
 	local function UpdatePlayers()
 		local PlayerEnts = GetEnts( "PlayerInfoEntity" )
+		local ExistingPlayers = {}
 
 		for _, Ent in IterateEntList( PlayerEnts ) do
 			AddPlayerToList( Ent )
+			ExistingPlayers[ Ent.clientId ] = true
+		end
+
+		for ID, Row in pairs( Rows ) do
+			if not ExistingPlayers[ ID ] then
+				PlayerList:RemoveRow( Row.Index )
+				Rows[ ID ] = nil
+			end
 		end
 	end
 
-	local function GenerateButton( Text, DoClick, Tooltip )
+	local ButtonHeight = Units.Auto.INSTANCE + HighResScaled( 6 )
+	local function GenerateButton( Data )
 		local Button = SGUI:Create( "Button" )
-		Button:SetSize( Vector( 192, 32, 0 ) )
-		Button:SetText( Text )
-		Button:SetFont( Fonts.kAgencyFB_Small )
+		Button:SetText( Data.Name )
 		Button.DoClick = function( Button )
-			DoClick( Button, PlayerList:GetSelectedRow() )
+			return Data.DoClick( Button, PlayerList:GetSelectedRow() )
 		end
-		Button:SetTooltip( Tooltip )
+		Button:SetTooltip( Data.Tooltip )
+		Button.MultiPlayer = Data.MultiPlayer
+
+		if Data.Icon then
+			Button:SetIcon( Data.Icon, SGUI.FontManager.GetHighResFont( SGUI.FontFamilies.Ionicons, 21 ) )
+			Button:SetIconAlignment( Data.IconAlignment )
+		end
+
+		local NumSelected = #PlayerList:GetSelectedRows()
+		if NumSelected == 0 or NumSelected > 1 and not Data.MultiPlayer then
+			Button:SetEnabled( false )
+		end
 
 		return Button
 	end
 
-	AdminMenu:AddTab( "Commands", {
+	local function GetFontScale()
+		return SGUI.FontManager.GetHighResFont( "kAgencyFB", 27 )
+	end
+
+	local function AddCommandButton( Category, CommandData, Font, Scale )
+		local Button = GenerateButton( CommandData )
+		Button:SetFontScale( Font, Scale )
+		Button:SetAutoSize( UnitVector( Percentage.ONE_HUNDRED, ButtonHeight ) )
+		Button:SetStyleName( "CommandButton" )
+
+		local Width = Units.Auto( Button ) + HighResScaled( 8 )
+		CommandsListWidth:AddValue( Width )
+
+		Button:CallOnRemove( function()
+			if not CommandsListWidth then return end
+
+			-- If the commands tab is visible (i.e. a plugin has been disabled while it's open), remove this unit from
+			-- the max width to avoid referencing the destroyed button at layout time.
+			CommandsListWidth:RemoveValue( Width )
+		end )
+
+		return Commands:AddObject( Category, Button )
+	end
+
+	AdminMenu:AddSystemTab( "Commands", {
+		TranslationKey = "ADMIN_MENU_COMMANDS_TAB",
+		Icon = SGUI.Icons.Ionicons.CodeWorking,
+		Position = AdminMenu.SystemTabPosition.START,
+		-- Always place this tab at the very start.
+		Precedence = -math.huge,
 		OnInit = function( Panel, Data )
+			local Layout = SGUI.Layout:CreateLayout( "Vertical", {
+				Padding = Spacing( HighResScaled( 16 ), HighResScaled( 24 ),
+					HighResScaled( 16 ), HighResScaled( 16 ) )
+			} )
+
+			local Font, Scale = GetFontScale()
+
 			Label = SGUI:Create( "Label", Panel )
-			Label:SetFont( Fonts.kAgencyFB_Small )
-			Label:SetBright( true )
-			Label:SetText( "Select a player (or players) and a command to run." )
-			Label:SetPos( Vector( 16, 24, 0 ) )
+			Label:SetFontScale( Font, Scale )
+			Label:SetText( Locale:GetPhrase( "Core", "ADMIN_MENU_PLAYERS_HELP" ) )
+			Label:SetMargin( Spacing( 0, 0, 0, HighResScaled( 8 ) ) )
+			Layout:AddElement( Label )
+
+			local CommandLayout = SGUI.Layout:CreateLayout( "Horizontal", {} )
 
 			PlayerList = SGUI:Create( "List", Panel )
-			PlayerList:SetAnchor( GUIItem.Left, GUIItem.Top )
-			PlayerList:SetPos( Vector( 16, 72, 0 ) )
-			PlayerList:SetColumns( 3, "Name", "NS2ID", "Team" )
+			PlayerList:SetDebugName( "AdminMenuCommandsTabPlayerList" )
+			PlayerList:SetColumns( Locale:GetPhrase( "Core", "NAME" ), "NS2ID",
+				Locale:GetPhrase( "Core", "TEAM" ) )
 			PlayerList:SetSpacing( 0.45, 0.3, 0.25 )
-			PlayerList:SetSize( Vector( 640 - 192 - 16, 512, 0 ) )
 			PlayerList:SetNumericColumn( 2 )
 			PlayerList:SetMultiSelect( true )
-			PlayerList.ScrollPos = Vector( 0, 32, 0 )
+			PlayerList:SetFill( true )
+			PlayerList:SetSecondarySortColumn( 3, 1 )
+			PlayerList:SetRowPosTransition( RowPosTransition )
 
-			UpdatePlayers()
+			AdminMenu.SetupListWithScaling( PlayerList )
 
-			Shine.Timer.Create( "AdminMenu_Update", 1, -1, function()
-				if not SGUI.IsValid( PlayerList ) then return end
+			PlayerList:SetMargin( Spacing( 0, 0, HighResScaled( 16 ), 0 ) )
 
-				UpdatePlayers()
-			end )
-
-			AdminMenu.RestoreListState( PlayerList, Data )
-
-			Hook.Add( "OnClientIDDisconnect", "AdminMenu_UpdatePlayers", function( ClientID )
-				local Row = Rows[ ClientID ]
-
-				if SGUI.IsValid( PlayerList ) and SGUI.IsValid( Row ) then
-					PlayerList:RemoveRow( Row.Index )
-
-					Rows[ ClientID ] = nil
-				end
-			end )
+			CommandLayout:AddElement( PlayerList )
 
 			Commands = SGUI:Create( "CategoryPanel", Panel )
-			Commands:SetAnchor( "TopRight" )
-			Commands:SetPos( Vector( -192 -16, 72, 0 ) )
-			Commands:SetSize( Vector( 192, 512, 0 ) )
+			Commands:SetDebugName( "AdminMenuCommandsTabCommandPanel" )
+			-- Note that due to cropping, anything with a negative y-coordinate is not rendered at all.
+			-- Thus this value must be greater-equal the font size.
+			Commands:SetCategoryHeight( HighResScaled( 28 ) )
+			CommandLayout:AddElement( Commands )
 
+			CommandsListWidth = Units.Max( HighResScaled( 192 ) )
 			local Categories = AdminMenu.Commands
 
 			TableSort( Categories, function( A, B )
@@ -364,15 +601,20 @@ do
 				local Name = Category.Name
 				local CommandList = Category.Commands
 
-				Commands:AddCategory( Name )
+				local CategoryButton = Commands:AddCategory( Name )
+				CategoryButton:SetFontScale( Font, Scale )
+
+				local Width = Units.Auto( CategoryButton ) + HighResScaled( 8 )
+				CommandsListWidth:AddValue( Width )
+				CategoryButton:CallOnRemove( function()
+					if not CommandsListWidth then return end
+
+					CommandsListWidth:RemoveValue( Width )
+				end )
 
 				for j = 1, #CommandList do
 					local CommandData = CommandList[ j ]
-					local Command = CommandData.Name
-					local DoClick = CommandData.DoClick
-					local Tooltip = CommandData.Tooltip
-
-					Commands:AddObject( Name, GenerateButton( Command, DoClick, Tooltip ) )
+					CommandData.Button = AddCommandButton( Name, CommandData, Font, Scale )
 				end
 			end
 
@@ -383,6 +625,41 @@ do
 					end
 				end
 			end
+
+			Commands:SetAutoSize( UnitVector( CommandsListWidth, Percentage.ONE_HUNDRED ) )
+
+			function PlayerList:OnSelectionChanged( Rows )
+				local Buttons = Commands:GetAllObjects()
+				local NumRows = #Rows
+
+				for i = 1, #Buttons do
+					local Button = Buttons[ i ]
+					Button:SetEnabled( NumRows > 0 and ( NumRows == 1 or Button.MultiPlayer ) )
+				end
+			end
+
+			Layout:AddElement( CommandLayout )
+
+			Panel:SetLayout( Layout )
+			Panel:InvalidateLayout( true )
+
+			if not AdminMenu.RestoreListState( PlayerList, Data ) then
+				PlayerList:SortRows( 3 )
+			end
+
+			UpdatePlayers()
+
+			Shine.Timer.Create( "AdminMenu_Update", 1, -1, function()
+				if not SGUI.IsValid( PlayerList ) then return end
+
+				UpdatePlayers()
+			end )
+
+			-- Forget selection when the admin menu is closed.
+			Hook.Add( "OnAdminMenuClosed", "AdminMenu_CommandsTab", function()
+				if not SGUI.IsValid( PlayerList ) then return end
+				PlayerList:ResetSelection()
+			end )
 		end,
 
 		OnCleanup = function( Panel )
@@ -403,133 +680,133 @@ do
 			Label = nil
 			PlayerList = nil
 			Commands = nil
+			CommandsListWidth = nil
 
 			TableEmpty( Rows )
 
 			Shine.Timer.Destroy( "AdminMenu_Update" )
-			Hook.Remove( "OnClientIDDisconnect", "AdminMenu_UpdatePlayers" )
+			Hook.Remove( "OnAdminMenuClosed", "AdminMenu_CommandsTab" )
 
 			return Data
-		end } )
+		end
+	} )
 
-	function AdminMenu:RunCommand( Command, Args )
-		if not Args then
+	local TableConcat = table.concat
+	function AdminMenu:RunCommand( Command, ... )
+		if not ... then
 			Shared.ConsoleCommand( Command )
 		else
-			Shared.ConsoleCommand( StringFormat( "%s %s", Command, Args ) )
+			Shared.ConsoleCommand( StringFormat( "%s %s", Command, TableConcat( { ... }, " " ) ) )
 		end
 	end
 
-	function AdminMenu:AskForSinglePlayer()
-		local Window = SGUI:Create( "Panel" )
-		Window:SetAnchor( "CentreMiddle" )
-		Window:SetSize( Vector( 400, 200, 0 ) )
-		Window:SetPos( Vector( -200, -100, 0 ) )
+	local function GetArgFromPlayer( SteamID, Name )
+		if SteamID == "0" then
+			-- It's a bot, so we need to use their name to target them.
+			return StringGSub( Name, "\"", "\\\"" )
+		end
+		return SteamID
+	end
 
-		Window:AddTitleBar( "Error" )
+	local function GetArgFromRow( Row )
+		return GetArgFromPlayer( Row:GetColumnText( 2 ), Row:GetColumnText( 1 ) )
+	end
 
-		Shine.AdminMenu:DestroyOnClose( Window )
-
-		function Window.CloseButton.DoClick()
-			Shine.AdminMenu:DontDestroyOnClose( Window )
-			Window:Destroy()
+	local function GetArgsFromRows( Rows, MultiPlayer )
+		if MultiPlayer then
+			return StringFormat( "\"%s\"", Shine.Stream( Rows ):Concat( ",", GetArgFromRow ) )
 		end
 
-		Window:SkinColour()
-
-		local Label = SGUI:Create( "Label", Window )
-		Label:SetAnchor( "CentreMiddle" )
-		Label:SetFont( Fonts.kAgencyFB_Small )
-		Label:SetBright( true )
-		Label:SetText( "Please select a single player." )
-		Label:SetPos( Vector( 0, -40, 0 ) )
-		Label:SetTextAlignmentX( GUIItem.Align_Center )
-		Label:SetTextAlignmentY( GUIItem.Align_Center )
-
-		local OK = SGUI:Create( "Button", Window )
-		OK:SetAnchor( "CentreMiddle" )
-		OK:SetSize( Vector( 128, 32, 0 ) )
-		OK:SetPos( Vector( -64, 40, 0 ) )
-		OK:SetFont( Fonts.kAgencyFB_Small )
-		OK:SetText( "OK" )
-
-		function OK.DoClick()
-			Shine.AdminMenu:DontDestroyOnClose( Window )
-			Window:Destroy()
-		end
+		return StringFormat( "\"%s\"", GetArgFromRow( Rows[ 1 ] ) )
 	end
 
 	function AdminMenu:AddCommand( Category, Name, Command, MultiPlayer, DoClick, Tooltip )
+		local Icon, IconAlignment
 		if not DoClick then
 			DoClick = function( Button, Rows )
 				if #Rows == 0 then return end
 
 				if not MultiPlayer and #Rows > 1 then
-					self:AskForSinglePlayer()
-
 					return
 				end
 
-				if MultiPlayer then
-					local IDs = {}
+				self:RunCommand( Command, GetArgsFromRows( Rows, MultiPlayer ) )
+			end
+		elseif IsType( DoClick, "function" ) then
+			local OldDoClick = DoClick
+			DoClick = function( Button, Rows )
+				if #Rows == 0 then return end
 
-					for i = 1, #Rows do
-						local Row = Rows[ i ]
-
-						IDs[ i ] = Row:GetColumnText( 2 )
-					end
-
-					self:RunCommand( Command, TableConcat( IDs, "," ) )
-				else
-					self:RunCommand( Command, Rows[ 1 ]:GetColumnText( 2 ) )
+				if not MultiPlayer and #Rows > 1 then
+					return
 				end
+
+				return OldDoClick( Button, Shine.Stream.Of( Rows ):Map( function( Row )
+					return Row:GetColumnText( 2 )
+				end ):AsTable() )
 			end
 		elseif IsType( DoClick, "table" ) then
 			local Data = DoClick
 
 			local Menu
+			local RemovedFrameNumber
+			local function CleanupMenu()
+				self:DontDestroyOnClose( Menu )
+				Menu:Destroy()
+				Menu = nil
+			end
+
+			Icon = SGUI.Icons.Ionicons.ChevronRight
+			IconAlignment = SGUI.LayoutAlignment.MAX
 			DoClick = function( Button, Rows )
 				if #Rows == 0 then return end
 
 				if Menu then
-					self:DontDestroyOnClose( Menu )
-
-					Menu:Destroy()
-					Menu = nil
-
+					CleanupMenu()
 					return
 				end
+
+				if Button:GetLastMouseDownFrameNumber() == RemovedFrameNumber then return end
 
 				if not MultiPlayer and #Rows > 1 then
-					self:AskForSinglePlayer()
-
 					return
 				end
 
-				local Args
-				if MultiPlayer then
-					local IDs = {}
+				local Args = GetArgsFromRows( Rows, MultiPlayer )
 
-					for i = 1, #Rows do
-						local Row = Rows[ i ]
-
-						IDs[ i ] = Row:GetColumnText( 2 )
-					end
-
-					Args = TableConcat( IDs, "," )
-				else
-					Args = Rows[ 1 ]:GetColumnText( 2 )
+				local MenuOptions = Data
+				if IsType( Data.BuildMenuOptions, "function" ) then
+					MenuOptions = Data.BuildMenuOptions( Rows, {
+						GetArgFromPlayer = GetArgFromPlayer
+					} )
 				end
 
-				Menu = Button:AddMenu( Vector( 128, 32, 0 ) )
+				local NumOptions = #MenuOptions
+				if NumOptions == 0 then return false end
+
+				Menu = Button:AddMenu( UnitVector(
+					HighResScaled( Data.Width or 144 ),
+					HighResScaled( Data.ButtonHeight or 32 )
+				) )
 				Menu:CallOnRemove( function()
 					Menu = nil
+					RemovedFrameNumber = SGUI.FrameNumber()
 				end )
+
+				if IsType( Data.HorizontalMenuPadding, "number" ) then
+					Menu:SetButtonWidthPadding( HighResScaled( Data.HorizontalMenuPadding ) )
+				end
+
+				if IsType( Data.MaxVisibleButtons, "number" ) then
+					Menu:SetMaxVisibleButtons( Data.MaxVisibleButtons )
+				end
+
 				self:DestroyOnClose( Menu )
 
-				for i = 1, #Data, 2 do
-					local Option = Data[ i ]
-					local Arg = Data[ i + 1 ]
+				local Font, Scale = SGUI.FontManager.GetHighResFont( "kAgencyFB", 27 )
+				for i = 1, NumOptions, 2 do
+					local Option = MenuOptions[ i ]
+					local Arg = MenuOptions[ i + 1 ]
 
 					if IsType( Arg, "string" ) then
 						Menu:AddButton( Option, function()
@@ -539,37 +816,24 @@ do
 								self:RunCommand( Command, StringFormat( "%s %s", Args, Arg ) )
 							end
 
-							self:DontDestroyOnClose( Menu )
-
-							Menu:Destroy()
-							Menu = nil
-						end )
+							CleanupMenu()
+						end ):SetFontScale( Font, Scale )
 					elseif IsType( Arg, "function" ) then
 						Menu:AddButton( Option, function()
-							Arg()
-
-							self:DontDestroyOnClose( Menu )
-
-							Menu:Destroy()
-							Menu = nil
-						end )
+							Arg( Args )
+							CleanupMenu()
+						end ):SetFontScale( Font, Scale )
+					elseif IsType( Arg, "table" ) and Arg.Setup then
+						Arg.Setup( Menu, Command, Args, CleanupMenu )
 					end
 				end
+
+				Menu:FitToScreen()
 			end
 		end
 
 		local Categories = self.Commands
-		local CategoryObj
-
-		for i = 1, #Categories do
-			local Obj = Categories[ i ]
-
-			if Obj.Name == Category then
-				CategoryObj = Obj
-				break
-			end
-		end
-
+		local CategoryObj = TableFindByField( Categories, "Name", Category )
 		local ShouldAdd
 
 		if not CategoryObj then
@@ -584,85 +848,145 @@ do
 		end
 
 		local CommandsList = CategoryObj.Commands
+		local Data = {
+			Command = Command,
+			Name = Name,
+			DoClick = DoClick,
+			Tooltip = Tooltip,
+			MultiPlayer = MultiPlayer,
+			Icon = Icon,
+			IconAlignment = IconAlignment
+		}
 
-		CommandsList[ #CommandsList + 1 ] = { Name = Name, DoClick = DoClick, Tooltip = Tooltip }
+		CommandsList[ #CommandsList + 1 ] = Data
 
-		if Commands then
+		if SGUI.IsValid( Commands ) then
 			if ShouldAdd then
 				Commands:AddCategory( Category )
 			end
 
-			Commands:AddObject( Category, GenerateButton( Name, DoClick, Tooltip ) )
+			Data.Button = AddCommandButton( Category, Data, GetFontScale() )
+			Commands.Parent:InvalidateLayout()
 		end
+	end
+
+	function AdminMenu:RemoveCommand( Category, Command )
+		local Categories = self.Commands
+		local CategoryObj = TableFindByField( Categories, "Name", Category )
+		if not CategoryObj then return false end
+
+		local CommandEntry, Index = TableFindByField( CategoryObj.Commands, "Command", Command )
+		if not Index then return false end
+
+		TableRemove( CategoryObj.Commands, Index )
+
+		if #CategoryObj.Commands == 0 then
+			return self:RemoveCommandCategory( Category )
+		end
+
+		if SGUI.IsValid( Commands ) then
+			Commands:RemoveObject( Category, CommandEntry.Button )
+			Commands.Parent:InvalidateLayout()
+		end
+
+		return true
 	end
 
 	function AdminMenu:RemoveCommandCategory( Category )
 		local Categories = self.Commands
-		local Index
-
-		for i = 1, #Categories do
-			local Obj = Categories[ i ]
-
-			if Obj.Name == Category then
-				Index = i
-				break
-			end
-		end
-
-		if not Index then return end
+		local Obj, Index = TableFindByField( Categories, "Name", Category )
+		if not Index then return false end
 
 		TableRemove( Categories, Index )
 
 		if SGUI.IsValid( Commands ) then
 			Commands:RemoveCategory( Category )
 		end
+
+		return true
 	end
 end
 
 do
-local WebPage
-local Text = [[Shine was created by Person8880.
+-- Apparently labels have a character limit.
+local Text = {
+[[Shine was created by Person8880.
 
 Special thanks to:
 - Ghoul for being the first major plugin author and helping with pull requests.
 - Lance Hilliard for also helping with pull requests.
 - DePara for being the first server admin to use Shine.
-- You for using my mod and therefore reading this text!]]
+- You for using my mod and therefore reading this text!
 
-	AdminMenu:AddTab( "About", {
+Got an issue or a feature request? Head over to the mod's GitHub page and post an
+issue, or leave a comment on the workshop page.
+]],
+[[The mod's GitHub issue tracker can be found here:]],
+{
+	Text = [[https://github.com/Person8880/Shine/issues]],
+	StyleName = "Link",
+	DoClick = function( self )
+		Client.ShowWebpage( self:GetText() )
+	end
+},
+[[
+
+If you need help with how the mod functions, you can view the wiki by clicking the button
+below. If you want to get to it outside the game, visit:]],
+{
+	Text = [[https://github.com/Person8880/Shine/wiki]],
+	StyleName = "Link",
+	DoClick = function( self )
+		Client.ShowWebpage( self:GetText() )
+	end
+}
+}
+
+	AdminMenu:AddSystemTab( "About", {
+		TranslationKey = "ADMIN_MENU_ABOUT_TAB",
+		Icon = SGUI.Icons.Ionicons.HelpCircled,
+		Position = AdminMenu.SystemTabPosition.END,
+		-- Always place this tab at the very end.
+		Precedence = math.huge,
 		OnInit = function( Panel )
-			local Label = SGUI:Create( "Label", Panel )
-			Label:SetPos( Vector( 16, 24, 0 ) )
-			Label:SetFont( "fonts/AgencyFB_small.fnt" )
-			Label:SetText( Text )
-			Label:SetBright( true )
+			local Layout = SGUI.Layout:CreateLayout( "Vertical", {
+				Padding = Spacing( HighResScaled( 16 ), HighResScaled( 24 ),
+					HighResScaled( 16 ), HighResScaled( 16 ) )
+			} )
+			Panel:SetLayout( Layout )
+
+			local Font, Scale = SGUI.FontManager.GetHighResFont( "kAgencyFB", 27 )
+
+			for i = 1, #Text do
+				local Label = SGUI:Create( "Label", Panel )
+				Label:SetFontScale( Font, Scale )
+
+				local LabelText = Text[ i ]
+				if IsType( LabelText, "string" ) then
+					Label:SetText( LabelText )
+				else
+					Label:SetText( LabelText.Text )
+					Label:SetStyleName( LabelText.StyleName )
+					Label.DoClick = LabelText.DoClick
+				end
+				Layout:AddElement( Label )
+			end
 
 			local HomeButton = SGUI:Create( "Button", Panel )
-			HomeButton:SetAnchor( "TopRight" )
-			HomeButton:SetPos( Vector( -144, 176, 0 ) )
-			HomeButton:SetSize( Vector( 128, 32, 0 ) )
-			HomeButton:SetFont( Fonts.kAgencyFB_Small )
-			HomeButton:SetText( "Back to wiki" )
+			HomeButton:SetAutoSize( UnitVector( Percentage.ONE_HUNDRED, Units.Auto.INSTANCE + HighResScaled( 8 ) ) )
+			HomeButton:SetAlignment( SGUI.LayoutAlignment.MAX )
+			HomeButton:SetFontScale( Font, Scale )
+			HomeButton:SetText( Locale:GetPhrase( "Core", "ADMIN_MENU_OPEN_WIKI" ) )
 			function HomeButton:DoClick()
-				WebPage:LoadURL( "https://github.com/Person8880/Shine/wiki", 640, 360 )
+				Shine:OpenWebpage( "https://github.com/Person8880/Shine/wiki", "Shine Wiki" )
 			end
 
-			if not SGUI.IsValid( WebPage ) then
-				WebPage = SGUI:Create( "Webpage", Panel )
-				WebPage:SetPos( Vector( 16, 224, 0 ) )
-				WebPage:LoadURL( "https://github.com/Person8880/Shine/wiki", 640, 360 )
-			else
-				WebPage:SetParent( Panel )
-				WebPage:SetIsVisible( true )
-			end
-
-			AdminMenu:DontDestroyOnClose( WebPage )
+			Layout:AddElement( HomeButton )
+			Panel:InvalidateLayout( true )
 		end,
 
 		OnCleanup = function( Panel )
-			WebPage:SetParent()
-			WebPage:SetIsVisible( false )
-			AdminMenu:DestroyOnClose( WebPage )
+
 		end
 	} )
 end

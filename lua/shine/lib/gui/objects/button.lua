@@ -2,9 +2,14 @@
 	Button control.
 ]]
 
-local SGUI = Shine.GUI
+local Binder = require "shine/lib/gui/binding/binder"
 
-local Clock = os.clock
+local SGUI = Shine.GUI
+local Units = SGUI.Layout.Units
+
+local Max = math.max
+local rawget = rawget
+local StringFormat = string.format
 
 local Button = {}
 
@@ -12,47 +17,56 @@ local ClickSound = "sound/NS2.fev/common/button_enter"
 Client.PrecacheLocalSound( ClickSound )
 Button.Sound = ClickSound
 
+SGUI.AddBoundProperty( Button, "Font", "Label:SetFont" )
+SGUI.AddBoundProperty( Button, "TextAlignment", "Label:SetAlignment" )
+SGUI.AddBoundProperty( Button, "TextAlignmentX", "Label:SetTextAlignmentX" )
+SGUI.AddBoundProperty( Button, "TextAlignmentY", "Label:SetTextAlignmentY" )
+SGUI.AddBoundProperty( Button, "TextAutoEllipsis", "Label:SetAutoEllipsis" )
+SGUI.AddBoundProperty( Button, "TextColour", {
+	"Label:SetColour",
+	function( self, Colour )
+		if self.Icon and not self.IconColour then
+			self.Icon:SetColour( Colour )
+		end
+	end
+} )
+SGUI.AddBoundProperty( Button, "TextInheritsParentAlpha", { "Label:SetInheritsParentAlpha", "Icon:SetInheritsParentAlpha" } )
+SGUI.AddBoundProperty( Button, "TextIsVisible", "Label:SetIsVisible" )
+SGUI.AddBoundProperty( Button, "TextScale", "Label:SetTextScale" )
+SGUI.AddBoundProperty( Button, "TextShadow", "Label:SetShadow" )
+
+SGUI.AddBoundProperty( Button, "IconAlignment", "Icon:SetAlignment" )
+SGUI.AddBoundProperty( Button, "IconColour", "Icon:SetColour" )
+SGUI.AddBoundProperty( Button, "IconAutoFont", "Icon:SetAutoFont" )
+SGUI.AddBoundProperty( Button, "IconIsVisible", "Icon:SetIsVisible" )
+SGUI.AddBoundProperty( Button, "IconMargin", "Icon:SetMargin" )
+SGUI.AddBoundProperty( Button, "IconShadow", "Icon:SetShadow" )
+
+local function UpdateIconMargin( self )
+	if not self.Icon then return end
+
+	if self.Label and self.Label:GetIsVisible() then
+		self.Icon:SetMargin(
+			self.IconMargin or ( self.Horizontal and Units.Spacing( 0, 0, Units.HighResScaled( 8 ), 0 ) or nil )
+		)
+	else
+		self.Icon:SetMargin( nil )
+	end
+end
+
 function Button:Initialise()
 	self.BaseClass.Initialise( self )
-
-	if self.Background then GUI.DestroyItem( self.Background ) end
-
-	local Background = GetGUIManager():CreateGraphicItem()
-
-	self.Background = Background
-
-	local Scheme = SGUI:GetSkin()
-
-	self.ActiveCol = Scheme.ActiveButton
-	self.InactiveCol = Scheme.InactiveButton
-
-	Background:SetColor( self.InactiveCol )
-
-	self.TextCol = Scheme.BrightText
-
+	self.Background = self:MakeGUIItem()
 	self:SetHighlightOnMouseOver( true )
-end
+	self:SetTextInheritsParentAlpha( true )
 
-function Button:OnSchemeChange( Scheme )
-	if not self.UseScheme then return end
+	self.Horizontal = true
+	self.TextIsVisible = true
+	self.IconIsVisible = true
 
-	self.ActiveCol = Scheme.ActiveButton
-	self.InactiveCol = Scheme.InactiveButton
-	self.TextCol = Scheme.BrightText
+	self:SetLayout( SGUI.Layout:CreateLayout( "Horizontal" ) )
 
-	if self.Text then
-		self.Text:SetColor( self.TextCol )
-	end
-
-	self.Background:SetColor( self.Highlighted and self.ActiveCol or self.InactiveCol )
-end
-
-function Button:SetupStencil()
-	self.BaseClass.SetupStencil( self )
-
-	if not self.Text then return end
-
-	self.Text:SetInheritsParentStencilSettings( true )
+	self:AddPropertyChangeListener( "TextIsVisible", UpdateIconMargin )
 end
 
 function Button:SetCustomSound( Sound )
@@ -60,61 +74,188 @@ function Button:SetCustomSound( Sound )
 end
 
 function Button:SetText( Text )
-	if self.Text then
-		self.Text:SetText( Text )
+	if SGUI.IsValid( self.Label ) then
+		if not Text then
+			self.Label:Destroy()
+			self.Label = nil
+			self:InvalidateParent()
+			self:OnPropertyChanged( "Text", nil )
+			return
+		end
+
+		if self.Label:GetText() == Text then return end
+
+		self.Label:SetText( Text )
+		self:InvalidateParent()
+		self:InvalidateLayout()
+		self:OnPropertyChanged( "Text", Text )
 
 		return
 	end
 
-	local Description = GetGUIManager():CreateTextItem()
-	Description:SetAnchor( GUIItem.Middle, GUIItem.Center )
-	Description:SetTextAlignmentX( GUIItem.Align_Center )
-	Description:SetTextAlignmentY( GUIItem.Align_Center )
+	if not Text then return end
+
+	local Description = SGUI:Create( "Label", self )
+	Description:SetIsSchemed( false )
+	Description:SetAlignment( self.TextAlignment or SGUI.LayoutAlignment.CENTRE )
+	Description:SetCrossAxisAlignment( SGUI.LayoutAlignment.CENTRE )
 	Description:SetText( Text )
-	Description:SetColor( self.TextCol )
+	if self.TextColour then
+		Description:SetColour( self.TextColour )
+	end
+	if not self.PropagateAlphaInheritance then
+		Description:SetInheritsParentAlpha( self.TextInheritsParentAlpha )
+	end
+	Description:SetIsVisible( self.TextIsVisible )
+	-- Need to offset the text based on its internal alignment.
+	Description:SetUseAlignmentCompensation( true )
+
+	if self.TextShadow ~= nil then
+		Description:SetShadow( self.TextShadow )
+	end
+
+	Binder():FromElement( self, "Horizontal" )
+		:ToElement( Description, "AutoWrap", {
+			Transformer = function( Horizontal )
+				return not Horizontal
+			end
+		} )
+		:ToElement( Description, "AutoSize", {
+			Transformer = function( Horizontal )
+				if Horizontal then
+					return nil
+				end
+				return Units.UnitVector( Units.Percentage.ONE_HUNDRED, Units.Auto.INSTANCE )
+			end
+		} )
+		:ToElement( Description, "Fill", {
+			Filter = function() return self.TextAutoEllipsis end
+		} )
+		:ToElement( Description, "TextAlignmentX", {
+			Transformer = function( Horizontal )
+				return Horizontal and GUIItem.Align_Min or GUIItem.Align_Center
+			end
+		} ):BindProperty()
+
+	Binder():FromElement( self, "TextAutoEllipsis" )
+		:ToElement( Description, "Fill", {
+			Filter = function() return self.Horizontal end
+		} ):BindProperty()
 
 	if self.Font then
-		Description:SetFontName( self.Font )
+		Description:SetFont( self.Font )
 	end
 
 	if self.TextScale then
-		Description:SetScale( self.TextScale )
+		Description:SetTextScale( self.TextScale )
 	end
 
-	if self.Stencilled then
-		Description:SetInheritsParentStencilSettings( true )
+	if self.TextAutoEllipsis ~= nil then
+		Description:SetAutoEllipsis( self.TextAutoEllipsis )
 	end
 
-	self.Background:AddChild( Description )
-	self.Text = Description
+	self.Layout:AddElement( Description )
+	self.Label = Description
+	self:InvalidateParent()
+
+	UpdateIconMargin( self )
+
+	self:OnPropertyChanged( "Text", Text )
 end
 
 function Button:GetText()
-	if not self.Text then return "" end
-	return self.Text:GetText()
+	if not self.Label then return "" end
+	return self.Label:GetText()
 end
 
-function Button:SetFont( Font )
-	self.Font = Font
+function Button:SetIcon( IconName, Font, Scale )
+	if not IconName then
+		if SGUI.IsValid( self.Icon ) then
+			self.Icon:Destroy()
+			self.Icon = nil
+		end
 
-	if not self.Text then return end
+		self.IconName = nil
+		self.IconFont = nil
+		self.IconTextScale = nil
 
-	self.Text:SetFontName( Font )
+		return
+	end
+
+	if not Font and not Scale then
+		Font, Scale = SGUI.FontManager.GetHighResFont( SGUI.FontFamilies.Ionicons, 32 )
+	else
+		Font = Font or SGUI.Fonts.Ionicons
+		Scale = Scale or 1
+	end
+
+	self.IconName = IconName
+	self.IconFont = Font
+	self.IconTextScale = Scale
+
+	if self.Icon then
+		self.Icon:SetText( IconName )
+		self.Icon:SetFontScale( Font, Scale )
+		return
+	end
+
+	local Icon = SGUI:Create( "Label", self )
+	Icon:SetIsSchemed( false )
+	Icon:SetAlignment( self.IconAlignment or SGUI.LayoutAlignment.CENTRE )
+	Icon:SetCrossAxisAlignment( SGUI.LayoutAlignment.CENTRE )
+	Icon:SetFontScale( Font, Scale )
+	if self.IconColour or self.TextColour then
+		Icon:SetColour( self.IconColour or self.TextColour )
+	end
+	if self.IconAutoFont then
+		Icon:SetAutoFont( self.IconAutoFont )
+	end
+	Icon:SetText( IconName )
+	if not self.PropagateAlphaInheritance then
+		Icon:SetInheritsParentAlpha( self.TextInheritsParentAlpha )
+	end
+	Icon:SetIsVisible( self.IconIsVisible )
+	if self.IconShadow ~= nil then
+		Icon:SetShadow( self.IconShadow )
+	end
+
+	self.Layout:InsertElement( Icon, 1 )
+	self.Icon = Icon
+
+	UpdateIconMargin( self )
 end
 
-function Button:SetTextScale( Scale )
-	self.TextScale = Scale
+function Button:GetIcon()
+	return self.IconName, self.IconFont, self.IconTextScale
+end
 
-	if not self.Text then return end
+function Button:SetHorizontal( Horizontal )
+	Horizontal = not not Horizontal
 
-	self.Text:SetScale( Scale )
+	if Horizontal == self.Horizontal then return end
+
+	self.Horizontal = Horizontal
+
+	self:SetLayout( SGUI.Layout:CreateLayout( Horizontal and "Horizontal" or "Vertical" ), true )
+
+	if self.Icon then
+		self.Layout:AddElement( self.Icon )
+		UpdateIconMargin( self )
+	end
+
+	if self.Label then
+		self.Layout:AddElement( self.Label )
+	end
+
+	self:OnPropertyChanged( "Horizontal", Horizontal )
 end
 
 function Button:SetActiveCol( Col )
 	self.ActiveCol = Col
 
 	if self.Highlighted then
-		self.Background:SetColor( Col )
+		self:StopFade( self.Background )
+		self:SetBackgroundColour( Col )
 	end
 end
 
@@ -122,75 +263,101 @@ function Button:SetInactiveCol( Col )
 	self.InactiveCol = Col
 
 	if not self.Highlighted then
-		self.Background:SetColor( Col )
+		self:StopFade( self.Background )
+		self:SetBackgroundColour( Col )
 	end
-end
-
-function Button:SetTextColour( Col )
-	self.TextCol = Col
-
-	if not self.Text then return end
-
-	self.Text:SetColor( Col )
-end
-
-function Button:SetIsVisible( Bool )
-	if not self.Background then return end
-
-	Bool = Bool and true or false
-
-	local WasVisible = self.Background:GetIsVisible()
-	if WasVisible == Bool then return end
-
-	self.Background:SetIsVisible( Bool )
-end
-
-function Button:Think( DeltaTime )
-	if not self.Background then return end
-	if not self.Background:GetIsVisible() then return end
-
-	self.BaseClass.Think( self, DeltaTime )
-
-	if SGUI.IsValid( self.Tooltip ) then
-		self.Tooltip:Think( DeltaTime )
-	end
-
-	self:CallOnChildren( "Think", DeltaTime )
-end
-
-function Button:SetDoClick( Func )
-	self.DoClick = Func
-end
-
-function Button:SetTexture( Texture )
-	self.Background:SetTexture( Texture )
-	self.Texture = Texture
 end
 
 function Button:SetHighlightTexture( Texture )
 	self.HighlightTexture = Texture
 end
 
-function Button:AddMenu( Size )
+Button.MenuPos = {
+	RIGHT = "RIGHT",
+	BOTTOM = "BOTTOM"
+}
+
+function Button:AddMenu( Size, MenuPos )
 	if SGUI.IsValid( self.Menu ) then
 		return self.Menu
 	end
 
+	MenuPos = MenuPos or self.MenuPos.RIGHT
+
 	local Pos = self:GetScreenPos()
-	Pos.x = Pos.x + self:GetSize().x
+	if MenuPos == self.MenuPos.RIGHT then
+		Pos.x = Pos.x + self:GetSize().x
+	elseif MenuPos == self.MenuPos.BOTTOM then
+		Pos.y = Pos.y + self:GetSize().y
+	elseif MenuPos then
+		Pos = Pos + MenuPos
+	end
 
 	local Menu = SGUI:Create( "Menu" )
+	-- As the Menu element is not a child of the button, the skin must be set manually.
+	if self.PropagateSkin then
+		Menu:SetSkin( self:GetSkin() )
+	end
+
+	Menu:SetDebugName( StringFormat( "%s.Menu", self:GetDebugName() ) )
 	Menu:SetPos( Pos )
 	Menu:SetButtonSize( Size or self:GetSize() )
 
-	self.ForceHighlight = true
+	self:SetForceHighlight( true )
+
 	Menu:CallOnRemove( function()
-		self.ForceHighlight = nil
+		if self:IsValid() then
+			self:SetForceHighlight( false )
+			-- This is called regardless of the menu field to ensure destroying the menu immediately notifies any
+			-- listeners. The menu field itself is used below in SetOpenMenuOnClick to detect when it was closed due to
+			-- clicking the button, thus it's not cleared here.
+			self:OnPropertyChanged( "Menu", nil )
+		end
 	end )
 
 	self.Menu = Menu
+	self:OnPropertyChanged( "Menu", Menu )
 
 	return Menu
+end
+
+function Button:DestroyMenu()
+	local Menu = self.Menu
+	if not SGUI.IsValid( Menu ) then return end
+
+	Menu:Destroy()
+
+	self.Menu = nil
+	self:OnPropertyChanged( "Menu", nil )
+end
+
+-- Provides a helper that automatically handles menu opening on click, as well as closing the menu
+-- when clicked while the menu is open without re-opening it.
+function Button:SetOpenMenuOnClick( PopulateMenuFunc )
+	self:SetDoClick( function( self )
+		if self.Menu and rawget( self.Menu, "DestroyedBy" ) == self then
+			-- Clicked the button to close the menu.
+			self.Menu = nil
+			self:OnPropertyChanged( "Menu", nil )
+			return
+		end
+
+		if SGUI.IsValid( self.Menu ) then
+			self:DestroyMenu()
+			return
+		end
+
+		local MenuParams = PopulateMenuFunc( self )
+		local Menu = self:AddMenu( MenuParams.Size, MenuParams.MenuPos )
+		MenuParams.Populate( Menu )
+	end )
+end
+
+function Button:OnEffectiveVisibilityChanged( IsEffectivelyVisible, UpdatedControl )
+	-- If the button becomes invisible for any reason, destroy any open menu.
+	if not IsEffectivelyVisible then
+		self:DestroyMenu()
+	end
 end
 
 function Button:OnMouseDown( Key, DoubleClick )
@@ -201,55 +368,49 @@ function Button:OnMouseDown( Key, DoubleClick )
 		return true, Child
 	end
 
-	if Key ~= InputKey.MouseButton0 then return end
-	--We can't trust self.Highlighted.
-	if not self:MouseIn( self.Background ) then return end
+	if not self:IsEnabled() then return end
 
-	return true, self
+	return self.Mixins.Clickable.OnMouseDown( self, Key, DoubleClick )
 end
 
-function Button:OnMouseUp( Key )
-	if not self:GetIsVisible() then return end
-	if not self:MouseIn( self.Background ) then return end
+SGUI:AddMixin( Button, "AutoSizeText" )
 
-	local Time = Clock()
+do
+	local LabelSizeMethod = {
+		"GetCachedTextWidth",
+		"GetCachedTextHeight"
+	}
 
-	if ( self.ClickDelay or 0.1 ) > 0 and ( self.NextClick or 0 ) > Time then return true end
+	local function GetSize( Label, Axis )
+		if not Label then return 0 end
 
-	self.NextClick = Time + ( self.ClickDelay or 0.1 )
+		return Label[ LabelSizeMethod[ Axis ] ]( Label )
+	end
 
-	if self.DoClick then
-		local Sound = self.Sound
-		if self:DoClick() ~= false and Sound then
-			Shared.PlaySound( nil, Sound )
+	function Button:GetContentSizeForAxis( Axis )
+		if self.Label then
+			-- Temporarily override the computed size to be based on the label's actual size to ensure the returned size
+			-- is based on the maximum size of the label. Label may be set to fill here for horizontal buttons.
+			self.Label.GetComputedSize = GetSize
 		end
 
-		return true
+		local Size = self:GetContentSizeForAxisFromLayout( Axis )
+
+		if self.Label then
+			self.Label.GetComputedSize = nil
+		end
+
+		return Size
 	end
 end
 
-function Button:OnMouseMove( Down )
-	self.BaseClass.OnMouseMove( self, Down )
-
-	self:CallOnChildren( "OnMouseMove", Down )
-end
-
-function Button:OnMouseWheel( Down )
-	local Result = self:CallOnChildren( "OnMouseWheel", Down )
-
-	if Result ~= nil then return true end
-end
-
-function Button:PlayerKeyPress( Key, Down )
-	if self:CallOnChildren( "PlayerKeyPress", Key, Down ) then
-		return true
+function Button:Cleanup()
+	if SGUI.IsValid( self.Menu ) then
+		self.Menu:Destroy()
 	end
+	return self.BaseClass.Cleanup( self )
 end
 
-function Button:PlayerType( Char )
-	if self:CallOnChildren( "PlayerType", Char ) then
-		return true
-	end
-end
-
+SGUI:AddMixin( Button, "Clickable" )
+SGUI:AddMixin( Button, "EnableMixin" )
 SGUI:Register( "Button", Button )

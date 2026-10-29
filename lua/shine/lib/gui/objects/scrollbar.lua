@@ -7,142 +7,208 @@ local SGUI = Shine.GUI
 local Scrollbar = {}
 
 local Clamp = math.Clamp
+local Max = math.max
 local Vector = Vector
+
+-- Override the default setter to ensure it only affects self.Background, as self.Bar should always inherit alpha to
+-- allow for proper fading behaviour.
+SGUI.AddBoundProperty( Scrollbar, "InheritsParentAlpha", "Background" )
+
+local SetInactiveCol = SGUI.AddProperty( Scrollbar, "InactiveCol" )
+local SetActiveCol = SGUI.AddProperty( Scrollbar, "ActiveCol" )
 
 function Scrollbar:Initialise()
 	self.BaseClass.Initialise( self )
 
-	local Manager = GetGUIManager()
-
-	local Background = Manager:CreateGraphicItem()
-
+	local Background = self:MakeGUIItem()
 	self.Background = Background
 
-	local Bar = Manager:CreateGraphicItem()
-	Bar:SetAnchor( GUIItem.Left, GUIItem.Top )
-
+	local Bar = self:MakeGUIItem()
+	Bar:SetInheritsParentAlpha( true )
 	Background:AddChild( Bar )
 
-	local Scheme = SGUI:GetSkin()
-
-	Background:SetColor( Scheme.ScrollbarBackground )
-	Bar:SetColor( Scheme.Scrollbar )
-
-	self.ActiveCol = Scheme.ScrollbarActive
-	self.InactiveCol = Scheme.Scrollbar
-
 	self.Bar = Bar
-
 	self.BarPos = Vector( 0, 0, 0 )
-
-	self.Pos = 0
+	self.ScrollPosition = 0
 	self.ScrollSize = 1
+
+	self.Horizontal = false
+	self.ScrollAxis = "y"
+	self.ScrollEvent = "OnScrollChange"
+end
+
+function Scrollbar:IsCroppedByParent()
+	-- Scrollbar is never cropped (otherwise it wouldn't be visible in a scrollable area which makes no sense).
+	return false
+end
+
+local function GetAlphaCompensatedColour( self, Colour )
+	local Alpha = self:GetNormalAlpha( self.Background )
+	return SGUI.ColourWithAlpha( Colour, Alpha == 0 and 0 or ( Colour.a / Alpha ) )
+end
+
+function Scrollbar:SetInactiveCol( Colour )
+	if not SetInactiveCol( self, Colour ) then return false end
+
+	if not self.Scrolling then
+		self.Bar:SetColor( GetAlphaCompensatedColour( self, Colour ) )
+	end
+
+	return true
+end
+
+function Scrollbar:SetActiveCol( Colour )
+	if not SetActiveCol( self, Colour ) then return false end
+
+	if self.Scrolling then
+		self.Bar:SetColor( GetAlphaCompensatedColour( self, Colour ) )
+	end
+
+	return true
+end
+
+function Scrollbar:SetHorizontal( Horizontal )
+	self.Horizontal = Horizontal
+	self.ScrollAxis = Horizontal and "x" or "y"
+	self.ScrollEvent = Horizontal and "OnScrollChangeX" or "OnScrollChange"
+end
+
+function Scrollbar:FadeIn( Duration, Callback, EaseFunc )
+	self:ApplyTransition( {
+		Type = "AlphaMultiplier",
+		Duration = Duration,
+		Callback = Callback,
+		EasingFunction = EaseFunc,
+		EndValue = 1
+	} )
+end
+
+function Scrollbar:FadeOut( Duration, Callback, EaseFunc )
+	self:ApplyTransition( {
+		Type = "AlphaMultiplier",
+		Duration = Duration,
+		Callback = Callback,
+		EasingFunction = EaseFunc,
+		EndValue = 0
+	} )
+end
+
+function Scrollbar:StopFading()
+	if not self:GetEasing( "AlphaMultiplier", self.Background ) then return end
+
+	self:StopEasingType( "AlphaMultiplier", self.Background )
+	self:SetAlphaMultiplier( 1 )
+end
+
+function Scrollbar:SetHidden( Hidden )
+	if Hidden then
+		self:HideAndDisableInput()
+	else
+		self:ShowAndEnableInput()
+	end
+end
+
+function Scrollbar:HideAndDisableInput()
+	self.Background:SetIsVisible( false )
+	self.Disabled = true
+end
+
+function Scrollbar:ShowAndEnableInput()
+	self.Disabled = false
+	self.Background:SetIsVisible( true )
 end
 
 function Scrollbar:GetNormalAlpha( Element )
-	local Skin = SGUI:GetSkin()
-
 	if Element == self.Background then
-		return Skin.ScrollbarBackground.a
+		local Colour = self:GetStyleValue( "BackgroundColour" )
+		return Colour and Colour.a or 1
 	end
 
-	return Skin.Scrollbar.a
-end
-
-function Scrollbar:OnSchemeChange( Skin )
-	self.Background:SetColor( Skin.ScrollbarBackground )
-	self.Bar:SetColor( Skin.Scrollbar )
+	local Colour = self:GetStyleValue( "InactiveCol" )
+	return Colour and Colour.a or 1
 end
 
 function Scrollbar:SetSize( Size )
 	self.Size = Size
+	self.BaseClass.SetSize( self, Size )
 
-	if self.ScrollSizeVec then
-		self.ScrollSizeVec.y = Size.y * self.ScrollSize
-	else
-		self.ScrollSizeVec = Vector( Size.x, Size.y * self.ScrollSize, 0 )
+	self:UpdateScrollBarSize()
+end
+
+function Scrollbar:UpdateScrollBarSize()
+	local Size = self.Size
+	if not self.ScrollSizeVec then
+		self.ScrollSizeVec = Vector2( Size.x, Size.y )
 	end
 
-	self.Background:SetSize( Size )
+	self.ScrollSizeVec[ self.ScrollAxis ] = Size[ self.ScrollAxis ] * self.ScrollSize
 	self.Bar:SetSize( self.ScrollSizeVec )
 end
 
-function Scrollbar:SetScrollSize( Size )
-	local OldPos = self.Pos or 0
-	local OldDiff = self.Size.y - self.ScrollSizeVec.y
+function Scrollbar:SetScrollSize( Size, ForceUpdate )
+	local OldPos = self.ScrollPosition or 0
+	local OldDiff = self:GetDiffSize()
 
 	self.ScrollSize = Size
+	self:UpdateScrollBarSize()
 
-	if self.ScrollSizeVec then
-		self.ScrollSizeVec.y = self.Size.y * Size
-	else
-		self.ScrollSizeVec = Vector( self.Size.x, self.Size.y * Size, 0 )
-	end
+	-- If the scrolling size has shrunk, we may need to move up.
+	ForceUpdate = ForceUpdate or ( self:GetDiffSize() < OldDiff )
 
-	self.Bar:SetSize( self.ScrollSizeVec )
-
-	local NewDiff = self.Size.y - self.ScrollSizeVec.y
-	--If the scrolling size has shrunk, we may need to move up.
-	if NewDiff < OldDiff then
+	if ForceUpdate then
 		self:SetScroll( OldPos )
 	end
+end
+
+function Scrollbar:GetScroll()
+	return self.ScrollPosition
 end
 
 --[[
 	Sets how far down the scroll bar is.
 ]]
 function Scrollbar:SetScroll( Scroll, Smoothed )
-	local Diff = self.Size.y - self.ScrollSizeVec.y
+	local Diff = self:GetDiffSize()
 
 	Scroll = Clamp( Scroll, 0, Diff )
 
-	self.Pos = Scroll
-
-	self.BarPos.y = Scroll
-
+	self.ScrollPosition = Scroll
+	self.BarPos[ self.ScrollAxis ] = Scroll
 	self.Bar:SetPosition( self.BarPos )
 
-	if self.Parent and self.Parent.OnScrollChange then
-		self.Parent:OnScrollChange( Scroll, Diff, Smoothed )
+	if self.Parent and self.Parent[ self.ScrollEvent ] then
+		self.Parent[ self.ScrollEvent ]( self.Parent, Scroll, Diff, Smoothed )
 	end
 end
 
 function Scrollbar:GetDiffSize()
-	return self.Size.y - self.ScrollSizeVec.y
+	return Max( self.Size[ self.ScrollAxis ] - self.ScrollSizeVec[ self.ScrollAxis ], 0 )
 end
 
 function Scrollbar:ScrollToBottom( Smoothed )
-	local Diff = self.Size.y - self.ScrollSizeVec.y
-
-	self.Pos = Diff
-
-	self.BarPos.y = Diff
-
-	self.Bar:SetPosition( self.BarPos )
-
-	if self.Parent and self.Parent.OnScrollChange then
-		self.Parent:OnScrollChange( Diff, Diff, Smoothed )
-	end
+	self:SetScroll( self:GetDiffSize() )
 end
 
-local GetCursorPos
+local GetCursorPos = SGUI.GetCursorPos
 
 function Scrollbar:OnMouseDown( Key, DoubleClick )
+	if self.Disabled then return end
+	if not self:GetIsVisible() then return end
 	if Key ~= InputKey.MouseButton0 then return end
 	if not self:MouseIn( self.Bar ) then return end
 
 	self.Scrolling = true
 
-	GetCursorPos = GetCursorPos or Client.GetCursorPosScreen
-
 	local X, Y = GetCursorPos()
 
 	self.Scrolling = true
 
-	self.StartingPos = self.Pos
+	self.StartingScrollPosition = self.ScrollPosition
+	self.StartingX = X
 	self.StartingY = Y
 
-	self.Bar:SetColor( self.ActiveCol )
+	self:StopFading()
+	self.Bar:SetColor( GetAlphaCompensatedColour( self, self.ActiveCol ) )
 
 	return true, self
 end
@@ -152,10 +218,10 @@ SGUI.AddProperty( Scrollbar, "MouseWheelScroll" )
 function Scrollbar:OnMouseWheel( Down )
 	local Parent = self.Parent
 
-	if self:MouseIn( self.Background ) or Parent:MouseIn( Parent.Background ) then
-		local ScrollMagnitude = self.MouseWheelScroll or 32
+	if Parent:HasMouseEntered() or self:MouseIn( self.Background ) then
+		local ScrollMagnitude = self.MouseWheelScroll or SGUI.LinearScale( 32 )
 
-		self:SetScroll( self.Pos + ( Down and -ScrollMagnitude or ScrollMagnitude ) * self.ScrollSize, true )
+		self:SetScroll( self.ScrollPosition + ( Down and -ScrollMagnitude or ScrollMagnitude ) * self.ScrollSize, true )
 
 		return true
 	end
@@ -163,10 +229,10 @@ end
 
 function Scrollbar:OnMouseUp( Key )
 	if Key ~= InputKey.MouseButton0 then return end
+	if not self.Scrolling then return end
 
 	self.Scrolling = false
-
-	self.Bar:SetColor( self.InactiveCol )
+	self.Bar:SetColor( GetAlphaCompensatedColour( self, self.InactiveCol ) )
 
 	return true
 end
@@ -176,10 +242,9 @@ function Scrollbar:OnMouseMove( Down )
 	if not self.Scrolling then return end
 
 	local X, Y = GetCursorPos()
+	local Diff = self.Horizontal and ( X - self.StartingX ) or ( Y - self.StartingY )
 
-	local Diff = Y - self.StartingY
-
-	self:SetScroll( self.StartingPos + Diff, true )
+	self:SetScroll( self.StartingScrollPosition + Diff, true )
 end
 
 SGUI:Register( "Scrollbar", Scrollbar )

@@ -2,24 +2,21 @@
 	Shine timer library.
 ]]
 
+local Shine = Shine
+
 local SharedTime = Shared.GetTime
-local StringFormat = string.format
-local TableRemove = table.remove
-local xpcall = xpcall
+local Timers = Shine.UnorderedMap()
+local PausedTimers = {}
 
-local Map = Shine.Map
-
-local Timers = Map()
-
-Shine.Timer = {}
+local Timer = {}
+Shine.Timer = Timer
 
 local TimerMeta = {}
 TimerMeta.__index = TimerMeta
 
 function TimerMeta:Destroy()
-	if self.Name then
-		Timers:Remove( self.Name )
-	end
+	Timers:Remove( self.Name )
+	PausedTimers[ self.Name ] = nil
 end
 
 function TimerMeta:GetReps()
@@ -50,149 +47,146 @@ function TimerMeta:SetFunction( Func )
 	self.Func = Func
 end
 
+function TimerMeta:Debounce()
+	self.NextRun = SharedTime() + self.Delay
+end
+
 function TimerMeta:Pause()
 	if self.Paused then return end
 
 	self.Paused = true
 	self.TimeLeft = self:GetTimeUntilNextRun()
+
+	PausedTimers[ self.Name ] = self
+	Timers:Remove( self.Name )
 end
 
 function TimerMeta:Resume()
 	if not self.Paused then return end
+
+	PausedTimers[ self.Name ] = nil
+	Timers:Add( self.Name, self )
 
 	self.Paused = nil
 	self.NextRun = SharedTime() + self.TimeLeft
 	self.TimeLeft = nil
 end
 
---[[
-	Creates a timer.
-	Inputs: Name, delay in seconds, number of times to repeat, function to run.
-	Pass a negative number to reps to have it repeat indefinitely.
-]]
-local function Create( Name, Delay, Reps, Func )
-	local Time = SharedTime()
+do
+	local setmetatable = setmetatable
 
-	local OldObject = Timers:Get( Name )
+	--[[
+		Creates a timer.
+		Inputs: Name, delay in seconds, number of times to repeat, function to run, optional data to attach.
+		Pass a negative number to reps to have it repeat indefinitely.
+	]]
+	local function Create( Name, Delay, Reps, Func, Data )
+		-- Edit it so it's not destroyed if it's created again inside its old function.
+		local TimerObject = Timers:Get( Name ) or PausedTimers[ Name ]
+		if not TimerObject then
+			TimerObject = setmetatable( {}, TimerMeta )
+			Timers:Add( Name, TimerObject )
+		end
 
-	--Edit it so it's not destroyed if it's created again inside its old function.
-	if OldObject then
-		OldObject.Delay = Delay
-		OldObject.Reps = Reps
-		OldObject.Func = Func
-		OldObject.LastRun = 0
-		OldObject.NextRun = Time + Delay
+		TimerObject.Name = Name
+		TimerObject.Delay = Delay
+		TimerObject.Reps = Reps
+		TimerObject.Func = Func
+		TimerObject.LastRun = 0
+		TimerObject.NextRun = SharedTime() + Delay
+		TimerObject.Data = Data
 
-		return OldObject
+		return TimerObject
 	end
+	Timer.Create = Create
 
-	local Timer = setmetatable( {
-		Name = Name,
-		Delay = Delay,
-		Reps = Reps,
-		Func = Func,
-		LastRun = 0,
-		NextRun = Time + Delay
-	}, TimerMeta )
+	local SimpleCount = 1
 
-	Timers:Add( Name, Timer )
+	--[[
+		Creates a simple timer.
+		Inputs: Delay in seconds, function to run, optional data to attach.
+		Unlike a standard timer, this will only run once.
+	]]
+	function Timer.Simple( Delay, Func, Data )
+		local Index = "Simple"..SimpleCount
+		SimpleCount = SimpleCount + 1
 
-	return Timer
-end
-Shine.Timer.Create = Create
-
-local SimpleCount = 1
-
---[[
-	Creates a simple timer.
-	Inputs: Delay in seconds, function to run.
-	Unlike a standard timer, this will only run once.
-]]
-function Shine.Timer.Simple( Delay, Func )
-	local Index = "Simple"..SimpleCount
-
-	SimpleCount = SimpleCount + 1
-
-	return Create( Index, Delay, 1, Func )
+		return Create( Index, Delay, 1, Func, Data )
+	end
 end
 
 --[[
 	Removes a timer.
 	Input: Timer name to remove.
 ]]
-function Shine.Timer.Destroy( Name )
-	if Timers:Get( Name ) then
-		Timers:Remove( Name )
-	end
+function Timer.Destroy( Name )
+	Timers:Remove( Name )
+	PausedTimers[ Name ] = nil
 end
 
 --[[
 	Returns whether the given timer exists.
 	Input: Timer name to check.
 ]]
-local function Exists( Name )
-	return Timers:Get( Name ) ~= nil
-end
-Shine.Timer.Exists = Exists
-
-function Shine.Timer.Pause( Name )
-	if not Exists( Name ) then return end
-	
-	local Timer = Timers:Get( Name )
-
-	Timer:Pause()
-end
-
-function Shine.Timer.Resume( Name )
-	if not Exists( Name ) then return end
-	
-	local Timer = Timers:Get( Name )
-	
-	Timer:Resume()
-end
-
-local Error
-local StackTrace
-
-local function OnError( Err )
-	Error = Err
-	StackTrace = debug.traceback()
+function Timer.Exists( Name )
+	return Timers:Get( Name ) ~= nil or PausedTimers[ Name ] ~= nil
 end
 
 --[[
-	Checks and executes timers on server update.
+	Returns the timer instance for the given name, if it exists.
 ]]
-Shine.Hook.Add( "Think", "Timers", function( DeltaTime )
-	local Time = SharedTime()
+function Timer.Get( Name )
+	return Timers:Get( Name ) or PausedTimers[ Name ]
+end
 
-	--Run the timers.
+function Timer.GetTable()
+	local TimersByName = {}
 	for Name, Timer in Timers:Iterate() do
-		if Timer.NextRun <= Time and not Timer.Paused then
+		TimersByName[ Name ] = Timer
+	end
+	return TimersByName
+end
+
+function Timer.Pause( Name )
+	local Instance = Timers:Get( Name )
+	if not Instance then return end
+
+	Instance:Pause()
+end
+
+function Timer.Resume( Name )
+	local Instance = PausedTimers[ Name ]
+	if not Instance then return end
+
+	Instance:Resume()
+end
+
+local OnError = Shine.BuildErrorHandler( "Timer error" )
+local xpcall = xpcall
+
+local function ProcessTimers( Time )
+	for Name, Timer in Timers:Iterate() do
+		if Timer.NextRun <= Time then
 			if Timer.Reps > 0 then
 				Timer.Reps = Timer.Reps - 1
 			end
 
 			local Success = xpcall( Timer.Func, OnError, Timer )
-
-			if not Success then
-				Shine:DebugPrint( "Timer %s failed: %s.\n%s", true,
-					Name, Error, StackTrace )
-
-				Shine:AddErrorReport( StringFormat( "Timer %s failed: %s.",
-					Name, Error ), StackTrace )
-				
-				Error = nil
-				StackTrace = nil
-
+			if not Success or Timer.Reps == 0 then
 				Timer:Destroy()
 			else
-				if Timer.Reps == 0 then
-					Timer:Destroy()
-				else
-					Timer.LastRun = Time
-					Timer.NextRun = Time + Timer.Delay
-				end
+				Timer.LastRun = Time
+				Timer.NextRun = Time + Timer.Delay
 			end
 		end
 	end
+end
+-- For testing only, do not call directly.
+Timer.__ProcessTimers = ProcessTimers
+
+--[[
+	Checks and executes timers on server/client update.
+]]
+Shine.Hook.Add( "Think", "Timers", function( DeltaTime )
+	ProcessTimers( SharedTime() )
 end )

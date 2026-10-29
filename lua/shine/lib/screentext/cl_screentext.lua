@@ -4,11 +4,18 @@
 
 local DigitalTime = string.DigitalTime
 local IsType = Shine.IsType
+local RoundTo = math.RoundTo
 local SharedTime = Shared.GetTime
 local StringFormat = string.format
 local TimeToString = string.TimeToString
+local xpcall = xpcall
 
-local Messages = Shine.Map()
+local ScreenTextErrorHandler = Shine.BuildErrorHandler( "Screen text error" )
+
+local SGUI = Shine.GUI
+
+local GlobalIsVisible = true
+local Messages = Shine.UnorderedMap()
 Shine.TextMessages = Messages
 
 local StandardFonts = {
@@ -28,7 +35,35 @@ local FourKFonts = {
 }
 
 local ScreenText = {}
-ScreenText.__index = ScreenText
+
+do
+	local rawget = rawget
+	local rawset = rawset
+
+	local Text = setmetatable( {}, { __mode = "k" } )
+	ScreenText.__index = function( self, Key )
+		if Key == "Text" then
+			return Text[ self ]
+		end
+
+		return ScreenText[ Key ]
+	end
+
+	ScreenText.__newindex = function( self, Key, Value )
+		if Key == "Text" then
+			-- Force a format validity check now to avoid invalid text being assigned.
+			if not rawget( self, "IgnoreFormat" ) then
+				StringFormat( Value, "" )
+			end
+
+			Text[ self ] = Value
+
+			return
+		end
+
+		rawset( self, Key, Value )
+	end
+end
 
 function ScreenText:UpdateText()
 	if self.IgnoreFormat then
@@ -41,8 +76,8 @@ function ScreenText:UpdateText()
 end
 
 function ScreenText:End()
-	self.LastUpdate = SharedTime() - 1
-	self.Duration = 1
+	self.NextUpdate = SharedTime()
+	self.Duration = self.UpdateRate
 end
 
 function ScreenText:Remove()
@@ -63,12 +98,57 @@ function ScreenText:SetText( Text )
 	self.Obj:SetText( Text )
 end
 
+function ScreenText:SetIsVisible( Visible )
+	self.IsVisible = not not Visible
+
+	if not GlobalIsVisible then return end
+
+	self.Obj:SetIsVisible( Visible )
+end
+
+function ScreenText:GetIsVisible()
+	return self.Obj:GetIsVisible()
+end
+
+function ScreenText:SetTextAlignmentX( Alignment )
+	self.Obj:SetTextAlignmentX( Alignment )
+end
+
+function ScreenText:SetTextAlignmentY( Alignment )
+	self.Obj:SetTextAlignmentY( Alignment )
+end
+
+function ScreenText:SetScaledPos( X, Y )
+	local GUIObj = self.Obj
+	if not GUIObj then return end
+
+	self.x = X
+	self.y = Y
+
+	local ScrW = Client.GetScreenWidth()
+	local ScrH = Client.GetScreenHeight()
+
+	GUIObj:SetPosition( Vector( ScrW * self.x, ScrH * self.y, 0 ) )
+end
+
+function ScreenText:SetShadowEnabled( ShadowEnabled )
+	self.Obj:SetDropShadowEnabled( ShadowEnabled )
+end
+
+function ScreenText:SetShadowOffset( ShadowOffset )
+	self.Obj:SetDropShadowOffset( ShadowOffset )
+end
+
+function ScreenText:SetShadowColour( ShadowColour )
+	self.Obj:SetDropShadowColor( ShadowColour )
+end
+
 local function GetFontAndScale( ScrW, ScrH, Size )
 	local Font = StandardFonts[ Size ]
 
-	if ScrW > 1920 and ScrW <= 2880 then
+	if ScrH > SGUI.ScreenHeight.Normal and ScrH <= SGUI.ScreenHeight.Large then
 		Font = HighResFonts[ Size ]
-	elseif ScrW > 2880 then
+	elseif ScrH > SGUI.ScreenHeight.Large then
 		Font = FourKFonts[ Size ]
 	end
 
@@ -77,7 +157,7 @@ local function GetFontAndScale( ScrW, ScrH, Size )
 		ScaleVec = Vector( Font[ 2 ], Font[ 2 ], 0 )
 		Font = Font[ 1 ]
 	else
-		ScaleVec = ScrW <= 1920 and GUIScale( Vector( 1, 1, 1 ) ) or Vector( 1, 1, 1 )
+		ScaleVec = ScrH <= SGUI.ScreenHeight.Normal and GUIScale( Vector( 1, 1, 1 ) ) or Vector( 1, 1, 1 )
 	end
 
 	return Font, ScaleVec
@@ -121,6 +201,7 @@ function Shine.ScreenText.Add( ID, Params )
 	local Font, ScaleVec = GetFontAndScale( ScrW, ScrH, Size )
 
 	local MessageTable = Messages:Get( ID )
+	local AlreadyExists = MessageTable ~= nil
 	local GUIObj
 
 	if Alignment == 0 then
@@ -133,30 +214,35 @@ function Shine.ScreenText.Add( ID, Params )
 
 	if not MessageTable then
 		MessageTable = setmetatable( {
-			Index = ID
+			Index = ID,
+			IsVisible = true
 		}, ScreenText )
 
-		Messages:Add( ID, MessageTable )
+		MessageTable.IgnoreFormat = IgnoreFormat
+
+		-- Force text to be checked before we create a GUI item.
+		MessageTable.Text = Text
 
 		GUIObj = GUI.CreateItem()
 		GUIObj:SetOptionFlag( GUIItem.ManageRender )
 		GUIObj:SetTextAlignmentY( GUIItem.Align_Center )
-		GUIObj:SetIsVisible( true )
+		GUIObj:SetIsVisible( GlobalIsVisible )
 
 		MessageTable.Obj = GUIObj
 	else
 		GUIObj = MessageTable.Obj
 	end
 
-	local ShouldFade = FadeIn > 0.05
+	local ShouldFade = FadeIn > 0.05 and not AlreadyExists
 
+	MessageTable.IgnoreFormat = IgnoreFormat
 	MessageTable.Text = Text
 	MessageTable.Colour = Color( R / 255, G / 255, B / 255, ShouldFade and 0 or 1 )
 	MessageTable.Duration = Duration
 	MessageTable.x = X
 	MessageTable.y = Y
-	MessageTable.IgnoreFormat = IgnoreFormat
 	MessageTable.Size = Size
+	MessageTable.SuppressTextUpdates = false
 
 	GUIObj:SetTextAlignmentX( Alignment )
 	GUIObj:SetText( IgnoreFormat and Text or StringFormat( Text,
@@ -165,33 +251,53 @@ function Shine.ScreenText.Add( ID, Params )
 	GUIObj:SetPosition( Vector( ScrW * X, ScrH * Y, 0 ) )
 	GUIObj:SetColor( MessageTable.Colour )
 	GUIObj:SetFontName( Font )
+	GUIObj:SetIsVisible( GlobalIsVisible )
+
+	if Params.ShadowEnabled ~= false then
+		GUIObj:SetDropShadowEnabled( true )
+		GUIObj:SetDropShadowOffset( Params.ShadowOffset or Vector2( 2, 2 ) )
+		GUIObj:SetDropShadowColor( Params.ShadowColour or Colour( 0, 0, 0, 0.6 ) )
+	else
+		GUIObj:SetDropShadowEnabled( false )
+	end
 
 	if ShouldFade then
 		MessageTable.Fading = true
-		MessageTable.FadedIn = true
 		MessageTable.FadingIn = true
 		MessageTable.FadeElapsed = 0
 		MessageTable.FadeDuration = FadeIn
+	else
+		MessageTable.Fading = false
 	end
 
+	MessageTable.UpdateRate = Params.UpdateRate or 1
+	MessageTable.NextUpdate = SharedTime() + MessageTable.UpdateRate
 	MessageTable.LastUpdate = SharedTime()
+
+	Messages:Add( ID, MessageTable )
 
 	return MessageTable
 end
 
 --[[
-	Changes the text of a text label.
+	Gets the screen text instance with the given ID, if it exists.
+]]
+function Shine.ScreenText.Get( ID )
+	return Messages:Get( ID )
+end
+
+--[[
+	Changes the text of the screen text message with the given ID, if it exists.
 ]]
 function Shine.ScreenText.SetText( ID, Text )
 	local MessageTable = Messages:Get( ID )
 	if not MessageTable then return end
 
-	MessageTable.Text = Text
-	MessageTable.Obj:SetText( Text )
+	MessageTable:SetText( Text )
 end
 
 --[[
-	Immediately removes a text label.
+	Immediately removes the screen text message with the given ID, if it exists.
 ]]
 function Shine.ScreenText.Remove( ID )
 	local Message = Messages:Get( ID )
@@ -202,55 +308,68 @@ function Shine.ScreenText.Remove( ID )
 end
 
 --[[
-	Sets a text label to fade out from now. Looks better than removing.
+	Sets the screen text message with the given ID to fade out, starting from now.
+
+	Looks better than removing, but takes time to complete.
 ]]
 function Shine.ScreenText.End( ID )
 	local MessageTable = Messages:Get( ID )
 	if not MessageTable then return end
 
+	MessageTable.SuppressTextUpdates = true
 	MessageTable:End()
 end
 
---SUPER DUPER DEPRECATED! Use Shine.ScreenText.Add( ID, Params ), and save yourself function argument hell.
-function Shine:AddMessageToQueue( ID, X, Y, Text, Duration, R, G, B, Alignment, Size, FadeIn, IgnoreFormat )
-	return self.ScreenText.Add( ID, {
-		X = X, Y = Y,
-		Text = Text,
-		Duration = Duration,
-		R = R, G = G, B = B,
-		Alignment = Alignment,
-		Size = Size,
-		FadeIn = FadeIn,
-		IgnoreFormat = IgnoreFormat
-	} )
+--[[
+	Sets the visibility of all screen text elements in one go.
+
+	This is useful for full-screen menus with transparency to stop screen text elements conflicting/distracting.
+]]
+function Shine.ScreenText.SetIsVisible( IsVisible )
+	GlobalIsVisible = not not IsVisible
+
+	for ID, Message in Messages:Iterate() do
+		if GlobalIsVisible then
+			Message.Obj:SetIsVisible( Message.IsVisible )
+		else
+			Message.Obj:SetIsVisible( false )
+		end
+	end
+end
+
+function Shine.ScreenText.GetIsVisible()
+	return GlobalIsVisible
 end
 
 local function UpdateMessage( Index, Message, Time )
-	if not Message.LastUpdate then
-		Message.LastUpdate = Time
+	if Message.NextUpdate > Time then return end
+
+	local Duration = Message.Duration
+	if Duration then
+		-- The time since the last update may be more than the update rate.
+		Duration = RoundTo( Duration - ( Time - Message.LastUpdate ), Message.UpdateRate )
+		Message.Duration = Duration
 	end
 
-	if Message.LastUpdate + 1 > Time then return end
+	Message.LastUpdate = Time
+	Message.NextUpdate = Time + Message.UpdateRate
 
-	if Message.Duration then
-		Message.Duration = Message.Duration - 1
+	if not Message.SuppressTextUpdates then
+		xpcall( Message.UpdateText, ScreenTextErrorHandler, Message )
+
+		if Message.Think then
+			xpcall( Message.Think, ScreenTextErrorHandler, Message )
+		end
 	end
 
-	Message.LastUpdate = Message.LastUpdate + 1
-	Message:UpdateText()
-
-	if Message.Think then
-		Message:Think()
-	end
-
-	if Message.Duration == 0 then
+	if Duration and Duration <= 1 and Message.Colour.a > 0 and not Message.Fading then
 		Message.FadingIn = false
 		Message.Fading = true
 		Message.FadeElapsed = 0
 		Message.FadeDuration = 1
 	end
 
-	if Message.Duration == -1 then
+	if Duration and Duration <= 0 then
 		Shine.ScreenText.Remove( Index )
 	end
 end
@@ -261,7 +380,7 @@ local function ProcessQueue( Time )
 	end
 end
 
---Not the lifeform...
+-- Not the lifeform...
 local function ProcessFades( DeltaTime )
 	for Index, Message in Messages:Iterate() do
 		if Message.Fading then
@@ -273,28 +392,16 @@ local function ProcessFades( DeltaTime )
 				Message.Fading = false
 
 				Message.Colour.a = In and 1 or 0
-
 				Message.Obj:SetColor( Message.Colour )
 			else
 				local Progress = Message.FadeElapsed / Message.FadeDuration
 				local Alpha = 1 * ( In and Progress or ( 1 - Progress ) )
 
 				Message.Colour.a = Alpha
-
 				Message.Obj:SetColor( Message.Colour )
 			end
 		end
 	end
-end
-
---DEPRECATED! Use Shine.ScreenText.Remove( Index )
-function Shine:RemoveMessage( Index )
-	self.ScreenText.Remove( Index )
-end
-
---DEPRECATED! Use Shine.ScreenText.End( Index )
-function Shine:EndMessage( Index )
-	self.ScreenText.End( Index )
 end
 
 Shine.Hook.Add( "Think", "ScreenText", function( DeltaTime )
@@ -304,16 +411,16 @@ Shine.Hook.Add( "Think", "ScreenText", function( DeltaTime )
 	ProcessFades( DeltaTime )
 end )
 
-Client.HookNetworkMessage( "Shine_ScreenText", function( Message )
+Shine.HookNetworkMessage( "Shine_ScreenText", function( Message )
 	Shine.ScreenText.Add( Message.ID, Message )
 end )
 
-Client.HookNetworkMessage( "Shine_ScreenTextUpdate", function( Message )
+Shine.HookNetworkMessage( "Shine_ScreenTextUpdate", function( Message )
 	Shine.ScreenText.SetText( Message.ID, Message.Text )
 end )
 
-Client.HookNetworkMessage( "Shine_ScreenTextRemove", function( Message )
-	Shine.ScreenText.End( Message.ID )
+Shine.HookNetworkMessage( "Shine_ScreenTextRemove", function( Message )
+	Shine.ScreenText[ Message.Now and "Remove" or "End" ]( Message.ID )
 end )
 
 Shine.Hook.Add( "OnResolutionChanged", "ScreenText", function( OldX, OldY, NewX, NewY )

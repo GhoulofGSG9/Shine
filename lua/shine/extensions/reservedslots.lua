@@ -7,212 +7,233 @@
 local Shine = Shine
 
 local Floor = math.floor
+local GetNumClientsTotal = Server.GetNumClientsTotal
 local GetNumPlayersTotal = Server.GetNumPlayersTotal
 local GetMaxPlayers = Server.GetMaxPlayers
+local GetMaxSpectators = Server.GetMaxSpectators
 local Max = math.max
+local Min = math.min
 local tonumber = tonumber
 
-local Plugin = {}
-Plugin.Version = "2.0"
+local Plugin = Shine.Plugin( ... )
+Plugin.Version = "2.2"
 
 Plugin.HasConfig = true
 Plugin.ConfigName = "ReservedSlots.json"
 
+Plugin.SlotType = table.AsEnum{
+	"PLAYABLE", "ALL"
+}
+
 Plugin.DefaultConfig = {
-	Slots = 2, --How many slots?
-	TakeSlotInstantly = true --Should a player with reserved access use up a slot straight away?
+	-- How many slots?
+	Slots = 2,
+	-- Should a player with reserved access use up a slot straight away?
+	TakeSlotInstantly = true,
+	-- Which type(s) of slot should be reserved?
+	SlotType = Plugin.SlotType.PLAYABLE
 }
 
 Plugin.CheckConfig = true
 Plugin.CheckConfigTypes = true
 
+do
+	local Validator = Shine.Validator()
+	Validator:AddFieldRule( "SlotType",
+		Validator.InEnum( Plugin.SlotType, Plugin.SlotType.PLAYABLE ) )
+	Plugin.ConfigValidator = Validator
+end
+
 function Plugin:Initialise()
-	self.Config.Slots = Floor( tonumber( self.Config.Slots ) or 0 )
-
-	if self.Config.Slots > 0 then
-		if not self.Config.TakeSlotInstantly then
-			Server.AddTag( "R_S"..self.Config.Slots )
-		else
-			Server.AddTag( "R_S"..self:GetFreeReservedSlots() )
-		end
-	end
-
-	self.ConnectingCount = 0
-	self.Connecting = {}
+	self.Config.Slots = Max( Floor( tonumber( self.Config.Slots ) or 0 ), 0 )
+	self:SetReservedSlotCount( self:GetFreeReservedSlots() )
 
 	self:CreateCommands()
-
 	self.Enabled = true
 
 	return true
 end
 
+function Plugin:OnFirstThink()
+	self:SetReservedSlotCount( self:GetFreeReservedSlots() )
+end
+
 function Plugin:CreateCommands()
 	local function SetSlotCount( Client, Slots )
 		self.Config.Slots = Slots
-
-		self:UpdateTag( self:GetFreeReservedSlots() )
-
+		self:SetReservedSlotCount( self:GetFreeReservedSlots() )
 		self:SaveConfig()
+		Shine:AdminPrint( Client, "%s set reserved slot count to %i", true,
+			Shine.GetClientInfo( Client ), Slots )
 	end
 	local SetSlotCommand = self:BindCommand( "sh_setresslots", "resslots", SetSlotCount )
 	SetSlotCommand:AddParam{ Type = "number", Min = 0, Round = true,
-		Error = "Please specify the number of slots to set." }
-	SetSlotCommand:Help( "<slots> Sets the number of reserved slots." )
+		Error = "Please specify the number of slots to set.", Help = "slots" }
+	SetSlotCommand:Help( "Sets the number of reserved slots." )
+end
+
+function Plugin:PostJoinTeam( Gamerules, Player, OldTeam, NewTeam )
+	if OldTeam == kSpectatorIndex or NewTeam == kSpectatorIndex then
+		-- Update reserved slot count whenever spectators are added or removed.
+		self:SetReservedSlotCount( self:GetFreeReservedSlots() )
+	end
+end
+
+do
+	local function IsSpectator( Client ) return Client:GetIsSpectator() end
+
+	function Plugin:GetNumOccupiedReservedSlots()
+		local Clients, Count = Shine:GetClientsWithAccess( "sh_reservedslot" )
+		if self.Config.SlotType == self.SlotType.ALL then
+			-- When reserving all slots, the slot type a
+			-- reserved player is in doesn't matter.
+			return Count
+		end
+
+		local NumInSpectate = Shine.Stream( Clients )
+			:Filter( IsSpectator )
+			:GetCount()
+		-- For reserved player slots, only count those not in spectator slots.
+		return Count - Min( NumInSpectate, self:GetMaxSpectatorSlots() )
+	end
 end
 
 function Plugin:GetFreeReservedSlots()
+	-- If considering all slots, then the reserved slot count is offset by the
+	-- number of spectator slots to produce the number of reserved playable slots.
+	local Offset = self.Config.SlotType == self.SlotType.ALL
+		and self:GetMaxSpectatorSlots() or 0
+
 	local Slots = self.Config.Slots
-
 	if not self.Config.TakeSlotInstantly then
-		return Slots
+		return Max( Slots - Offset, 0 )
 	end
 
-	local Reserved, Count = Shine:GetClientsWithAccess( "sh_reservedslot" )
-
-	Slots = Max( Slots - Count, 0 )
-
-	return Slots
+	local Count = self:GetNumOccupiedReservedSlots()
+	return Max( Slots - Count - Offset, 0 )
 end
 
 --[[
-	Update the server tag with the current reserved slot count.
+	Set the number of reserved slots for the server browser/NS2 code.
 ]]
-function Plugin:UpdateTag( Slots )
-	local Tags = {}
-
-	Server.GetTags( Tags )
-
-	for i = 1, #Tags do
-		local Tag = Tags[ i ]
-
-		if Tag and Tag:find( "R_S" ) then
-			Server.RemoveTag( Tag )
-		end
-	end
-
-	Server.AddTag( "R_S"..Slots )
+function Plugin:SetReservedSlotCount( NumSlots )
+	Server.SetReservedSlotLimit( NumSlots )
 end
 
-local GetNumPlayers = Server.GetNumPlayers
-
---[[
-	Returns a better estimate at the player count than Server.GetNumPlayers() alone.
-	Takes into account connecting but not loaded players.
-]]
 function Plugin:GetRealPlayerCount()
-	if GetNumPlayersTotal then
-		--This includes the connecting player for whatever reason...
-		return GetNumPlayersTotal() - 1
-	end
-
-	return GetNumPlayers() + self.ConnectingCount
+	-- This includes the connecting player for whatever reason...
+	return GetNumPlayersTotal() - 1
 end
 
---[[
-	Adds a player to the connecting list. If they cancel loading we won't
-	know, so we give them 5 minutes to connect (NS2 can be slow to load...)
-	then remove them if they haven't connected by then.
-]]
-function Plugin:AddConnectingPlayer( ID )
-	if GetNumPlayersTotal then return end
-
-	--We don't want to add them again if they're still in the list.
-	if not self.Connecting[ ID ] then
-		self.Connecting[ ID ] = true
-		self.ConnectingCount = self.ConnectingCount + 1
-	end
-
-	self:CreateTimer( "Connecting_"..ID, 300, 1, function()
-		if not self.Connecting[ ID ] then return end
-		
-		self.Connecting[ ID ] = nil
-		self.ConnectingCount = self.ConnectingCount - 1
-	end )
+function Plugin:GetRealClientCount()
+	return GetNumClientsTotal() - 1
 end
 
---[[
-	On final connect, if we had the client stored as a connecting client,
-	then remove them as Server.GetNumPlayers() will now count them.
-]]
+function Plugin:GetMaxPlayers()
+	return GetMaxPlayers()
+end
+
+function Plugin:GetMaxSpectatorSlots()
+	return GetMaxSpectators()
+end
+
+function Plugin:HasReservedSlotAccess( Client )
+	return Shine:HasAccess( Client, "sh_reservedslot" )
+end
+
 function Plugin:ClientConnect( Client )
-	local ID = Client:GetUserId()
-
-	if self.Connecting[ ID ] then
-		self.Connecting[ ID ] = nil
-		self.ConnectingCount = self.ConnectingCount - 1
-
-		self:DestroyTimer( "Connecting_"..ID )
-	end
-
-	self:UpdateTag( self:GetFreeReservedSlots() )
+	self:SetReservedSlotCount( self:GetFreeReservedSlots() )
 end
 
-
 --[[
-	Update the server tag if a reserved slot client disconnects.
+	Update the number of free slots if a client who had reserved slot access
+	disconnects, and we take slots instantly.
 ]]
 function Plugin:ClientDisconnect( Client )
 	if not self.Config.TakeSlotInstantly then return end
-	
-	if self.Config.Slots > 0 and Shine:HasAccess( Client, "sh_reservedslot" ) then
-		self:UpdateTag( self:GetFreeReservedSlots() )
+
+	if self:HasReservedSlotAccess( Client ) then
+		self:SetReservedSlotCount( self:GetFreeReservedSlots() )
 	end
 end
+
+Plugin.ConnectionHandlers = {
+	-- Consumes playable slots only. Spectator slots are handled entirely by the default handler.
+	[ Plugin.SlotType.PLAYABLE ] = function( self, ID )
+		local NumPlayers = self:GetRealPlayerCount()
+		local MaxPlayers = self:GetMaxPlayers()
+
+		local Slots = self.Config.Slots
+
+		-- Deduct reserved slot users from the number of reserved slots empty.
+		if self.Config.TakeSlotInstantly then
+			Slots = self:GetFreeReservedSlots()
+			self:SetReservedSlotCount( Slots )
+		end
+
+		-- Allow if there's less players than public slots.
+		if NumPlayers < MaxPlayers - Slots then
+			return true
+		end
+
+		-- Allow if they have reserved access and we're not full.
+		if NumPlayers < MaxPlayers and self:HasReservedSlotAccess( ID ) then
+			return true
+		end
+
+		-- Here either they have reserved slot access but the server is full,
+		-- or they don't have reserved slot access and there's no free public slots.
+		-- Thus, fall through to the default NS2 behaviour which handles spectator slots.
+	end,
+	-- Consumes all slots, spectator slots will be blocked if they are reserved.
+	[ Plugin.SlotType.ALL ] = function( self, ID )
+		local NumClients = self:GetRealClientCount()
+		local MaxClients = self:GetMaxPlayers() + self:GetMaxSpectatorSlots()
+
+		local Slots = self.Config.Slots
+
+		-- Deduct reserved slot users from the number of reserved slots empty.
+		if self.Config.TakeSlotInstantly then
+			self:SetReservedSlotCount( self:GetFreeReservedSlots() )
+			-- The reserved slot count only applies to playable slots, this includes
+			-- spectator slots.
+			Slots = Max( Slots - self:GetNumOccupiedReservedSlots(), 0 )
+		end
+
+		-- If only spectator slots are free, then the default handler needs to run
+		-- to assign them to a spectator slot properly.
+		local ALLOWED
+		local ShouldFallThrough = self:GetRealPlayerCount() >= self:GetMaxPlayers()
+		if not ShouldFallThrough then
+			ALLOWED = true
+		end
+
+		-- Allow if all slots have not yet been filled.
+		if NumClients < MaxClients - Slots then
+			return ALLOWED
+		end
+
+		-- Allow if they have reserved access and we're not full.
+		local HasSlots = NumClients < MaxClients
+		if HasSlots and self:HasReservedSlotAccess( ID ) then
+			return ALLOWED
+		end
+
+		-- Deny entirely if the server is completely full or they have no
+		-- reserved slot access and only reserved slots are left.
+		return false, HasSlots and "Slot is reserved." or "Server is currently full."
+	end
+}
 
 --[[
-	A simple and effective reserved slot system.
-	At last, a proper connection event.
+	Checks the given NS2ID to see if it has reserved slot access.
+
+	If they do, or if the server has enough free non-reserved slots, they are allowed in.
+	If the client will be assigned to a spectator slot, then this will defer to the default
+	handler.
 ]]
 function Plugin:CheckConnectionAllowed( ID )
-	ID = tonumber( ID )
-
-	local Connected = self:GetRealPlayerCount()
-	local MaxPlayers = GetMaxPlayers()
-
-	local Slots = self.Config.Slots
-
-	--Deduct reserved slot users from the number of reserved slots empty.
-	if self.Config.TakeSlotInstantly then
-		Slots = self:GetFreeReservedSlots()
-
-		self:UpdateTag( Slots )
-	end
-
-	--Deny on full.
-	if Connected >= MaxPlayers then return false end
-	--Allow if they have reserved access, skip checking the connected count.
-	if Shine:HasAccess( ID, "sh_reservedslot" ) then
-		self:AddConnectingPlayer( ID )
-
-		return true
-	end
-
-	if Slots == 0 then
-		self:AddConnectingPlayer( ID )
-
-		return true
-	end
-
-	local MaxPublic = MaxPlayers - Slots
-
-	--We've got enough room for them.
-	if MaxPublic > Connected then
-		self:AddConnectingPlayer( ID )
-
-		return true
-	end
-
-	return false
+	return self.ConnectionHandlers[ self.Config.SlotType ]( self, tonumber( ID ) )
 end
 
-function Plugin:Cleanup()
-	self.BaseClass.Cleanup( self )
-	
-	self.ConnectingCount = nil
-	self.Connecting = nil
-
-	self.Enabled = false
-end
-
-Shine:RegisterExtension( "reservedslots", Plugin )
+return Plugin

@@ -6,14 +6,14 @@
 
 local Shine = Shine
 
-local GetOwner = Server.GetOwner
+local GetClientForPlayer = Shine.GetClientForPlayer
 local pairs = pairs
 local Random = math.random
 local SharedTime = Shared.GetTime
 local StringFormat = string.format
 local TableEmpty = table.Empty
 
-local Plugin = {}
+local Plugin = Shine.Plugin( ... )
 Plugin.Version = "1.0"
 
 Plugin.HasConfig = true
@@ -30,13 +30,16 @@ Plugin.DefaultConfig = {
 
 Plugin.CheckConfig = true
 Plugin.CheckConfigTypes = true
+Plugin.NotifyPrefixColour = {
+	255, 160, 0
+}
 
 function Plugin:Initialise()
-	local Gamerules = GetGamerules()
+	local Gamerules = GetGamerules and GetGamerules()
 
 	if Gamerules and Gamerules:GetGameStarted() then
 		self.GameStarted = true
-	end 
+	end
 
 	self.ReadyRoomTracker = {}
 	self.BlockedClients = {}
@@ -56,13 +59,13 @@ function Plugin:JoinTeam( Gamerules, Player, NewTeam, Force, ShineForce )
 	if ShineForce then return end
 
 	if NewTeam ~= kSpectatorIndex and NewTeam ~= kTeamReadyRoom then return end
-	
+
 	local Enabled, MapVote = Shine:IsExtensionEnabled( "mapvote" )
 	if Enabled and ( MapVote.CyclingMap or MapVote:IsEndVote() ) then
 		return
 	end
-	
-	local Client = GetOwner( Player )
+
+	local Client = GetClientForPlayer( Player )
 
 	if not Client then return end
 	if Client.JoinTeamRRPlugin then return end
@@ -75,8 +78,7 @@ function Plugin:JoinTeam( Gamerules, Player, NewTeam, Force, ShineForce )
 		if TimeToAllow and TimeToAllow > Time then
 			if not Shine:CanNotify( Client ) then return false end
 
-			Shine:NotifyColour( Client, 255, 160, 0,
-				"You have just been moved to a team. You cannot go back to the ready room yet." )
+			self:NotifyTranslated( Client, "SWITCH_TEAM_BLOCKED" )
 
 			return false
 		end
@@ -88,14 +90,14 @@ function Plugin:JoinTeam( Gamerules, Player, NewTeam, Force, ShineForce )
 	if Shine:HasAccess( Client, "sh_idleimmune" ) then return end
 
 	if Shine:CanNotify( Client ) then
-		Shine:NotifyColour( Client, 255, 160, 0, "Spectator mode has been disabled." )
+		self:NotifyTranslated( Client, "SPECTATOR_DISABLED" )
 	end
 
-	local Team = Player:GetTeam():GetTeamNumber()
+	local Team = Player:GetTeamNumber()
 
-	--Move ready room players onto a team if they attempt to spectate.
+	-- Respawn ready room players if they attempt to spectate.
 	if Team == kTeamReadyRoom then
-		self:JoinRandomTeam( Player )
+		Gamerules:JoinTeam( Player, kTeamReadyRoom, true, true )
 	end
 
 	return false
@@ -122,7 +124,7 @@ function Plugin:EndGame()
 		local Player = Players[ i ]
 
 		if Player then
-			local Client = GetOwner( Player )
+			local Client = GetClientForPlayer( Player )
 
 			if Client then
 				self.TeamMemory[ Client ] = Player:GetTeamNumber()
@@ -148,7 +150,7 @@ function Plugin:JoinRandomTeam( Player )
 	local Team1 = Gamerules:GetTeam( kTeam1Index ):GetNumPlayers()
 	local Team2 = Gamerules:GetTeam( kTeam2Index ):GetNumPlayers()
 
-	local Client = GetOwner( Player )
+	local Client = GetClientForPlayer( Player )
 
 	if not Client then return end
 
@@ -168,7 +170,7 @@ function Plugin:JoinRandomTeam( Player )
 			return
 		elseif LastTeam == 2 then
 			Gamerules:JoinTeam( Player, 1 )
-		
+
 			return
 		end
 
@@ -184,39 +186,37 @@ end
 
 function Plugin:AssignToTeam( Player )
 	if self.Config.NotifyOnTeamForce then
-		Shine:NotifyColour( Player, 255, 160, 0,
-			"You were moved onto a random team for being in the ready room too long." )
+		self:NotifyTranslated( Player, "IN_READY_ROOM_TOO_LONG" )
 	end
-	
+
 	return self:JoinRandomTeam( Player )
 end
 
 function Plugin:ProcessClient( Client, Time )
 	if Client:GetIsVirtual() then return end
-	
+
 	local ReadyRoomTracker = self.ReadyRoomTracker
 	local BlockedClients = self.BlockedClients
 
 	if Shine:HasAccess( Client, "sh_idleimmune" ) then return end --Immunity for admins.
 
 	local Player = Client:GetControllingPlayer()
-
 	if not Player then return end
-	
-	local Team = Player:GetTeam():GetTeamNumber()
+
+	local Team = Player:GetTeamNumber()
 
 	if Team == kTeamReadyRoom then
 		local Enabled, AFKKick = Shine:IsExtensionEnabled( "afkkick" )
 
 		if Enabled then
-			--Ignore AFK players.
-			if AFKKick:IsAFKFor( Client, AFKKick.Config.WarnTime * 60 ) then
+			-- Ignore AFK players.
+			if AFKKick:IsAFKFor( Client, AFKKick:GetWarnTimeInSeconds() ) then
 				return
 			end
 		end
 
 		local TimeToMove = ReadyRoomTracker[ Client ]
-		
+
 		if not TimeToMove then
 			ReadyRoomTracker[ Client ] = Time + self.Config.MaxIdleTime
 		else
@@ -264,7 +264,7 @@ function Plugin:Think()
 	end
 
 	if ( self.NextThink or 0 ) > Time then return end
-	
+
 	self.NextThink = Time + 1
 
 	local Clients = Shine.GameIDs
@@ -277,10 +277,8 @@ end
 function Plugin:Cleanup()
 	self.ReadyRoomTracker = nil
 	self.BlockedClients = nil
-
 	self.GameStarted = nil
-
-	self.Enabled = false
+	self.BaseClass.Cleanup( self )
 end
 
-Shine:RegisterExtension( "readyroom", Plugin )
+return Plugin

@@ -2,19 +2,52 @@
 	Misc. stuff...
 ]]
 
---Called when the client first presses a button.
-Shared.RegisterNetworkMessage( "Shine_ClientConfirmConnect", {} )
+do
+	local HookNetworkMessage
+	if Server then
+		HookNetworkMessage = Server.HookNetworkMessage
+	elseif Client then
+		HookNetworkMessage = Client.HookNetworkMessage
+	elseif Predict then
+		-- Do nothing on the prediction VM as network messages don't work correctly.
+		HookNetworkMessage = function() end
+	end
 
-local SendNetMessage = Server and Server.SendNetworkMessage or Client.SendNetworkMessage
+	local NetworkMessageErrorHandler = Shine.BuildErrorHandler( "Network message callback error" )
 
---Use the real thing, don't rely on a global other mods want to change which then breaks us...
-function Shine.SendNetworkMessage( ... )
-	return SendNetMessage( ... )
+	--[[
+		Hooks a network message and catches any errors thrown by the callback, allowing them to be reported.
+	]]
+	function Shine.HookNetworkMessage( Name, Callback )
+		return HookNetworkMessage( Name, function( ... )
+			xpcall( Callback, NetworkMessageErrorHandler, ... )
+		end )
+	end
 end
 
+if Predict then return end
+
+Shine.NotificationType = table.AsEnum( { "INFO", "WARNING", "ERROR" }, function( Index ) return Index end )
+
+Shared.RegisterNetworkMessage( "Shine_ClientConfirmConnect", {} )
+
+do
+	local SendNetMessage = Server and Server.SendNetworkMessage or Client.SendNetworkMessage
+
+	-- Use the real thing, don't rely on a global other mods want to change which then breaks us...
+	function Shine.SendNetworkMessage( ... )
+		return SendNetMessage( ... )
+	end
+end
+
+Script.Load( "lua/shine/core/shared/hotfix.lua" )
+
 if Server then
+	_G.Colour = Color
+
+	-- Called when the client first presses a button.
 	Server.HookNetworkMessage( "Shine_ClientConfirmConnect", function( Client, Data )
-		Shine.Hook.Call( "ClientConfirmConnect", Client )
+		Shine.Hook.Broadcast( "ClientConfirmConnect", Client )
 	end )
 
 	local IsType = Shine.IsType
@@ -27,9 +60,14 @@ if Server then
 			or nil to send to all.
 			2. MessageName - The name of the network message.
 			3. MessageTable - The data to send.
-			4. Reliable - Whether to send reliably.
+			4. Reliable - Whether to send reliably (default = true).
 	]]
 	function Shine:ApplyNetworkMessage( Target, MessageName, MessageTable, Reliable )
+		-- Default to reliable sending as it's usually the intention.
+		if Reliable == nil then
+			Reliable = true
+		end
+
 		if not Target then
 			self.SendNetworkMessage( MessageName, MessageTable, Reliable )
 			return
@@ -46,20 +84,21 @@ if Server then
 		self.SendNetworkMessage( Target, MessageName, MessageTable, Reliable )
 	end
 
-	return 
+	return
 end
 
-Shine.Hook.Add( "OnMapLoad", "SetupConfirmConnect", function()
-	local OldKeyPress
-	local SentRequest
+Shine.Hook.Add( "PlayerKeyPress", "ConfirmConnect", function()
+	Shine.Hook.Remove( "PlayerKeyPress", "ConfirmConnect" )
+	Shine.SendNetworkMessage( "Shine_ClientConfirmConnect", {}, true )
 
-	OldKeyPress = Shine.ReplaceClassMethod( "Player", "SendKeyEvent", function( self, Key, Down )
-		if not SentRequest then
-			Shine.SendNetworkMessage( "Shine_ClientConfirmConnect", {}, true )
-			
-			SentRequest = true
-		end
+	Shine.Hook.CallOnce( "OnFirstPlayerKeyPress" )
+end )
 
-		return OldKeyPress( self, Key, Down )
-	end )
+local HasMoved = false
+function Shine.HasLocalPlayerActivityOccurred()
+	return HasMoved
+end
+
+Shine.Hook.Add( "OnFirstPlayerKeyPress", function()
+	HasMoved = true
 end )

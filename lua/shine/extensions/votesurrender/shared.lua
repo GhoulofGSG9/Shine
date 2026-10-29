@@ -1,16 +1,15 @@
+--[[
+	Vote surrender shared.
+]]
 
-local Plugin = {}
+local Plugin = Shine.Plugin( ... )
+Plugin.EnabledGamemodes = {
+	[ "ns2" ] = true,
+	[ "mvm" ] = true
+}
 
 function Plugin:SetupDataTable()
 	self:AddDTVar( "integer", "ConcedeTime", kMinTimeBeforeConcede )
 end
 
-Shine:RegisterExtension( "votesurrender", Plugin )
-
-if Server then return end
-
-function Plugin:NetworkUpdate( Key, Old, New )
-	if Key == "ConcedeTime" then
-		kMinTimeBeforeConcede = New or kMinTimeBeforeConcede
-	end
-end
+return Plugin

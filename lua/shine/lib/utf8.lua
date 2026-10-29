@@ -4,14 +4,24 @@
 	Massive data dump at the start for upper -> lower case and vice-versa.
 ]]
 
+local BitBand = bit.band
+local BitBor = bit.bor
+local BitLShift = bit.lshift
+local BitRShift = bit.rshift
 local error = error
-local pcall = pcall
+local Max = math.max
+local Min = math.min
+local select = select
 local StringByte = string.byte
-local StringFind = string.find
+local StringChar = string.char
 local StringFormat = string.format
+local StringGSub = string.gsub
 local StringSub = string.sub
+local TableClear = require "table.clear"
 local TableConcat = table.concat
+local TableNew = require "table.new"
 local type = type
+local unpack = unpack
 
 local UTF8LowerToUpper = {
 	["a"] = "A",
@@ -1881,85 +1891,100 @@ local function TypeCheck( Arg, Type, ArgNumber, FuncName )
 	end
 end
 
+local function IdentityValid( Bytes ) return Bytes end
+
+local function IsValidContinuationByte( Byte )
+	-- Leftmost 2 bits must be 10
+	return Byte and BitBand( Byte, 0xC0 ) == 0x80
+end
+
+local function GetNumContinuationBytes( FirstByte )
+	-- Number of continuation bytes is the number of 1-bits at the start - 1, e.g. 0b110xxxxx has 1 continuation byte,
+	-- 0b1110xxxx has 2 and 0b1111xxxx has 3.
+	local ThirdBit = BitRShift( BitBand( FirstByte, 0x20 ), 5 )
+	return BitRShift( BitBand( FirstByte, 0x40 ), 6 )
+		+ ThirdBit
+		-- Multiplying here accounts for the case of a byte like 0b1101xxxx.
+		+ ThirdBit * BitRShift( BitBand( FirstByte, 0x10 ), 4 )
+end
+
+local ValidityChecks = {}
+for i = 0xC2, 0xF4 do
+	ValidityChecks[ i ] = IdentityValid
+end
+-- Check for overlong encoding.
+ValidityChecks[ 0xE0 ] = function( Bytes ) return Bytes[ 2 ] >= 0xA0 and Bytes or nil end
+ValidityChecks[ 0xF0 ] = function( Bytes ) return Bytes[ 2 ] >= 0x90 and Bytes or nil end
+ValidityChecks[ 0xF4 ] = function( Bytes ) return Bytes[ 2 ] <= 0x8F and Bytes or nil end
+-- Check for UTF-16 surrogate halves (0xD800 - 0xDFFF).
+ValidityChecks[ 0xED ] = function( Bytes ) return Bytes[ 2 ] <= 0x9F and Bytes or nil end
+
+-- Internal cache table to avoid creating tables for every character. Up to 4 bytes + the number of bytes total.
+local UTF8Bytes = TableNew( 5, 0 )
+local function BytesOf( FirstByte )
+	TableClear( UTF8Bytes )
+	UTF8Bytes[ 5 ] = 1
+	UTF8Bytes[ 1 ] = FirstByte
+	return UTF8Bytes
+end
+
+local function ASCII( String, Index, FirstByte )
+	return BytesOf( FirstByte )
+end
+
+local function Invalid() return nil end
+
+local function UTF8( String, Index, FirstByte )
+	local NumContinuationBytes = GetNumContinuationBytes( FirstByte )
+	local Bytes = BytesOf( FirstByte )
+	Bytes[ 5 ] = NumContinuationBytes + 1
+
+	for i = 1, NumContinuationBytes do
+		local Byte = StringByte( String, Index + i )
+		if not IsValidContinuationByte( Byte ) then
+			-- Every continuation byte must have the same 10xxxxxx structure.
+			return nil
+		end
+
+		Bytes[ i + 1 ] = Byte
+	end
+
+	return ValidityChecks[ FirstByte ]( Bytes )
+end
+
+local ByteHandlers = {}
+
+-- Trivial case, no continuation bytes.
+for i = 0, 0x7F do
+	ByteHandlers[ i ] = ASCII
+end
+
+-- Byte is invalid, or a continuation byte.
+for i = 0x80, 0xC1 do
+	ByteHandlers[ i ] = Invalid
+end
+
+-- Byte is start of UTF-8 character.
+for i = 0xC2, 0xF4 do
+	ByteHandlers[ i ] = UTF8
+end
+
+-- Byte is invalid, or a continuation byte.
+for i = 0xF5, 0xFF do
+	ByteHandlers[ i ] = Invalid
+end
+
 --[[
 	Returns the bytes used by the UTF-8 character.
 
 	Inputs: String to check, Index byte to start at.
-	Output: Bytes used by the UTF-8 character.
+	Output: Table of bytes used by the UTF-8 character.
 ]]
 local function GetUTF8Bytes( String, Index )
-	Index = Index or 1
+	local FirstByte = StringByte( String, Index )
+	if not FirstByte then return nil end
 
-	TypeCheck( String, "string", 1, "GetUTF8Bytes" )
-	TypeCheck( Index, "number", 2, "GetUTF8Bytes" )
-
-	local Byte = StringByte( String, Index )
-
-	if Byte > 0 and Byte <= 127 then
-		return Byte
-	elseif Byte >= 194 and Byte <= 223 then
-		local Byte2 = StringByte( String, Index + 1 )
-
-		if not Byte2 then
-			error( "UTF-8 string terminated early after first byte, expected one more" )
-		end
-
-		if Byte2 < 128 or Byte2 > 191 then
-			error( "Invalid UTF-8 character, invalid second byte" )
-		end
-
-		return Byte, Byte2
-	elseif Byte >= 224 and Byte <= 239 then
-		local Byte2 = StringByte( String, Index + 1 )
-		local Byte3 = StringByte( String, Index + 2 )
-
-		if not Byte2 or not Byte3 then
-			error( "UTF-8 string terminated early after first byte, expected two more" )
-		end
-
-		if Byte == 224 and ( Byte2 < 160 or Byte2 > 191 ) then
-			error( "Invalid UTF-8 character, invalid second byte" )
-		elseif Byte == 237 and ( Byte2 < 128 or Byte2 > 159 ) then
-			error( "Invalid UTF-8 character, invalid second byte" )
-		elseif Byte2 < 128 or Byte2 > 191 then
-			error( "Invalid UTF-8 character, invalid second byte" )
-		end
-
-		if Byte3 < 128 or Byte3 > 191 then
-			error( "Invalid UTF-8 character, invalid third byte" )
-		end
-
-		return Byte, Byte2, Byte3
-	elseif Byte >= 240 and Byte <= 244 then
-		-- UTF8-4
-		local Byte2 = StringByte( String, Index + 1 )
-		local Byte3 = StringByte( String, Index + 2 )
-		local Byte4 = StringByte( String, Index + 3 )
-
-		if not Byte2 or not Byte3 or not Byte4 then
-			error( "UTF-8 string terminated early after first byte, expected 3 more" )
-		end
-
-		if Byte == 240 and ( Byte2 < 144 or Byte2 > 191 ) then
-			error( "Invalid UTF-8 character, invalid second byte" )
-		elseif Byte == 244 and ( Byte2 < 128 or Byte2 > 143 ) then
-			error( "Invalid UTF-8 character, invalid second byte" )
-		elseif Byte2 < 128 or Byte2 > 191 then
-			error( "Invalid UTF-8 character, invalid second byte" )
-		end
-
-		if Byte3 < 128 or Byte3 > 191 then
-			error( "Invalid UTF-8 character, invalid third byte" )
-		end
-
-		if Byte4 < 128 or Byte4 > 191 then
-			error( "Invalid UTF-8 character, invalid fourth byte" )
-		end
-
-		return Byte, Byte2, Byte3, Byte4
-	else
-		error( "Invalid UTF-8 character, invalid first byte" )
-	end
+	return ByteHandlers[ FirstByte ]( String, Index, FirstByte )
 end
 
 --[[
@@ -1969,17 +1994,12 @@ end
 	Output: Number of bytes used by the UTF-8 character.
 ]]
 local function GetNumUTF8Bytes( String, Index )
-	local Byte1, Byte2, Byte3, Byte4 = GetUTF8Bytes( String, Index )
-
-	if Byte4 then
-		return 4
-	elseif Byte3 then
-		return 3
-	elseif Byte2 then
-		return 2
-	elseif Byte1 then
-		return 1
+	local Bytes = GetUTF8Bytes( String, Index )
+	if Bytes then
+		return Bytes[ 5 ]
 	end
+
+	return nil
 end
 
 --[[
@@ -1989,7 +2009,12 @@ end
 	Output: True if valid, false otherwise.
 ]]
 function string.IsValidUTF8( String, Index )
-	return ( pcall( GetUTF8Bytes, String, Index ) )
+	TypeCheck( String, "string", 1, "IsValidUTF8" )
+	if Index then
+		TypeCheck( Index, "number", 2, "IsValidUTF8" )
+	end
+
+	return GetUTF8Bytes( String, Index or 1 ) ~= nil
 end
 
 --[[
@@ -1999,26 +2024,144 @@ end
 	Output: Up to 4 bytes of data. Returns nil if the character is invalid UTF8.
 ]]
 function string.GetUTF8Bytes( String, Index )
-	local Success, Byte, Byte2, Byte3, Byte4 = pcall( GetUTF8Bytes, String, Index )
-	if Success then
-		return Byte, Byte2, Byte3, Byte4
+	TypeCheck( String, "string", 1, "GetUTF8Bytes" )
+	if Index then
+		TypeCheck( Index, "number", 2, "GetUTF8Bytes" )
+	end
+
+	local Bytes = GetUTF8Bytes( String, Index or 1 )
+	if Bytes then
+		return unpack( Bytes, 1, Bytes[ 5 ] )
 	end
 end
 
-local function MakeWrapperFunc( Func, Original )
-	return function( ... )
-		local Success, Result = pcall( Func, ... )
+--[[
+	Converts a character numeric value into a UTF-8 character.
+]]
+local function UTF8Char( Char )
+	if Char < 0 or Char > 0x10FFFF then
+		error( "bad argument #1 to 'UTF8Char' (out of range)", 2 )
+	end
 
-		if not Success then
-			if StringFind( Result, "Bad argument" ) then
-				error( Result, 0 )
-			end
+	if Char < 0x80 then
+		return StringChar( Char )
+	end
 
-			return Original( ... )
+	if Char < 0x800 then
+		return StringChar(
+			BitBor( 0xC0, BitBand( BitRShift( Char, 6 ), 0x1F ) ),
+			BitBor( 0x80, BitBand( Char, 0x3F ) )
+		)
+	end
+
+	if Char < 0x10000 then
+		return StringChar(
+			BitBor( 0xE0, BitBand( BitRShift( Char, 12 ), 0x0F ) ),
+			BitBor( 0x80, BitBand( BitRShift( Char, 6 ), 0x3F ) ),
+			BitBor( 0x80, BitBand( Char, 0x3F ) )
+		)
+	end
+
+	return StringChar(
+		BitBor( 0xF0, BitBand( BitRShift( Char, 18 ), 0x07 ) ),
+		BitBor( 0x80, BitBand( BitRShift( Char, 12 ), 0x3F ) ),
+		BitBor( 0x80, BitBand( BitRShift( Char, 6 ), 0x3F ) ),
+		BitBor( 0x80, BitBand( Char, 0x3F ) )
+	)
+end
+string.UTF8Char = UTF8Char
+
+do
+	local function GetMask( Bits )
+		local Mask = 1
+		for i = 1, Bits do
+			Mask = Mask + BitLShift( 1, i )
+		end
+		return Mask
+	end
+
+	--[[
+		Returns the UTF-8 code point for the given bytes.
+	]]
+	function string.UTF8CodePoint( ... )
+		local Bytes = select( "#", ... )
+		if Bytes == 0 or Bytes > 4 then
+			error( "incorrect number of arguments to UTF8CodePoint, expected between 1 and 4 bytes", 2 )
 		end
 
-		return Result
+		if Bytes == 1 then
+			return BitBand( select( 1, ... ), 0x7F )
+		end
+
+		-- Bits is really Bits - 1, as we start from 2 ^ 0.
+		local Bits = 5
+		local CodePoint = 0
+
+		for i = Bytes, 1, -1 do
+			local Byte = select( i, ... )
+			if Byte ~= nil then
+				local ShiftAmount = ( Bytes - i ) * 6
+
+				if i == 1 then
+					Bits = 6 - Bytes
+				end
+
+				local Mask = GetMask( Bits )
+				-- Cut out extra byte data, then shift.
+				CodePoint = CodePoint + BitLShift( BitBand( Byte, Mask ), ShiftAmount )
+			end
+		end
+
+		return CodePoint
 	end
+end
+
+local REPLACEMENT_CHAR = UTF8Char( 0xFFFD )
+
+local function UTF8Iterate( String, CurByte )
+	if CurByte > #String then return nil end
+
+	local CharBytes = GetNumUTF8Bytes( String, CurByte )
+	local Char
+
+	if not CharBytes then
+		CharBytes = 1
+		Char = REPLACEMENT_CHAR
+	else
+		Char = StringSub( String, CurByte, CurByte + CharBytes - 1 )
+	end
+
+	return CurByte + CharBytes, Char
+end
+--[[
+	Provides an iterator over the UTF8 characters in the given string.
+]]
+local function UTF8Chars( String )
+	return UTF8Iterate, String, 1
+end
+string.UTF8Chars = UTF8Chars
+
+--[[
+	Encodes a string into valid UTF-8, returning a table of UTF-8 characters.
+]]
+local function UTF8Encode( String )
+	local Count = 0
+	local Chars = TableNew( #String, 0 )
+
+	for ByteIndex, Char in UTF8Chars( String ) do
+		Count = Count + 1
+		Chars[ Count ] = Char
+	end
+
+	return Chars, Count
+end
+string.UTF8Encode = UTF8Encode
+
+--[[
+	Encodes a string into valid UTF-8, returning the string.
+]]
+function string.UTF8EncodeString( String )
+	return TableConcat( UTF8Encode( String ), "" )
 end
 
 --[[
@@ -2027,21 +2170,17 @@ end
 	Input: String
 	Output: Number of UTF-8 characters.
 ]]
-local function StringUTF8Length( String )
+function string.UTF8Length( String )
 	TypeCheck( String, "string", 1, "UTF8Length" )
 
-	local CurByte = 1
-	local Bytes = #String
 	local Count = 0
 
-	while CurByte <= Bytes do
+	for ByteIndex, Char in UTF8Chars( String ) do
 		Count = Count + 1
-		CurByte = CurByte + GetNumUTF8Bytes( String, CurByte )
 	end
 
 	return Count
 end
-string.UTF8Length = MakeWrapperFunc( StringUTF8Length, string.len )
 
 --[[
 	Returns the part of the string between Start and End where Start and End are UTF-8
@@ -2050,46 +2189,26 @@ string.UTF8Length = MakeWrapperFunc( StringUTF8Length, string.len )
 	Inputs: String, starting character position, ending character position.
 	Output: String between the two points.
 ]]
-local function UTF8Sub( String, Start, End )
+function string.UTF8Sub( String, Start, End )
 	End = End or -1
 
 	TypeCheck( String, "string", 1, "UTF8Sub" )
 	TypeCheck( Start, "number", 2, "UTF8Sub" )
 	TypeCheck( End, "number", 3, "UTF8Sub" )
 
-	local CurByte = 1
-	local Bytes = #String
-	local Count = 0
+	local Chars = UTF8Encode( String )
+	local UTF8Length = #Chars
+	if UTF8Length == 0 then return "" end
 
-	local UTF8Length = StringUTF8Length( String )
 	local StartChar = Start >= 0 and Start or UTF8Length + Start + 1
 	local EndChar = End >= 0 and End or UTF8Length + End + 1
 
-	if StartChar > EndChar then
+	if StartChar > EndChar or EndChar <= 0 then
 		return ""
 	end
 
-	local StartByte, EndByte = 1, Bytes
-
-	while CurByte <= Bytes do
-		Count = Count + 1
-
-		if Count == StartChar then
-			StartByte = CurByte
-		end
-
-		CurByte = CurByte + GetNumUTF8Bytes( String, CurByte )
-
-		if Count == EndChar then
-			EndByte = CurByte - 1
-
-			break
-		end
-	end
-
-	return StringSub( String, StartByte, EndByte )
+	return TableConcat( Chars, "", Max( StartChar, 1 ), Min( EndChar, UTF8Length ) )
 end
-string.UTF8Sub = MakeWrapperFunc( UTF8Sub, string.sub )
 
 --[[
 	Replaces UTF-8 characters based on a mapping table.
@@ -2101,36 +2220,25 @@ local function UTF8Replace( String, MapTable )
 	TypeCheck( String, "string", 1, "UTF8Replace" )
 	TypeCheck( MapTable, "table", 2, "UTF8Replace" )
 
-	local CurByte = 1
-	local Bytes = #String
-	local NewString = {}
+	local Chars = TableNew( #String, 0 )
 	local Count = 0
 
-	while CurByte <= Bytes do
-		local CharBytes = GetNumUTF8Bytes( String, CurByte )
-		local Char = StringSub( String, CurByte, CurByte + CharBytes - 1 )
-
+	for ByteIndex, Char in UTF8Chars( String ) do
 		Count = Count + 1
-		NewString[ Count ] = MapTable[ Char ] or Char
-
-		CurByte = CurByte + CharBytes
+		Chars[ Count ] = MapTable[ Char ] or Char
 	end
 
-	--Table concat saves garbage data from concatenating the string for each character.
-	return TableConcat( NewString, "" )
+	return TableConcat( Chars, "" )
 end
---Potentially unsafe, has no direct Lua equivalent.
 string.UTF8Replace = UTF8Replace
 
-local function UTF8Upper( String )
+function string.UTF8Upper( String )
 	return UTF8Replace( String, UTF8LowerToUpper )
 end
-string.UTF8Upper = MakeWrapperFunc( UTF8Upper, string.upper )
 
-local function UTF8Lower( String )
+function string.UTF8Lower( String )
 	return UTF8Replace( String, UTF8UpperToLower )
 end
-string.UTF8Lower = MakeWrapperFunc( UTF8Lower, string.lower )
 
 --[[
 	Reverses a UTF-8 string.
@@ -2138,31 +2246,70 @@ string.UTF8Lower = MakeWrapperFunc( UTF8Lower, string.lower )
 	Input: String.
 	Output: Reversed UTF-8 aware string.
 ]]
-local function UTF8Reverse( String )
+function string.UTF8Reverse( String )
 	TypeCheck( String, "string", 1, "UTF8Reverse" )
 
-	local Bytes = #String
-	local CurByte = Bytes
-	local NewString = {}
-	local Count = 0
+	local Chars = UTF8Encode( String )
+	local NumChars = #Chars
 
-	while CurByte > 0 do
-		local Char = StringByte( String, CurByte )
-
-		while Char >= 128 and Char <= 191 do
-			CurByte = CurByte - 1
-			Char = StringByte( String, CurByte )
-		end
-
-		local CharBytes = GetNumUTF8Bytes( String, CurByte )
-
-		Count = Count + 1
-		NewString[ Count ] = StringSub( String, CurByte, CurByte + CharBytes - 1 )
-
-		CurByte = CurByte - 1
+	for i = 1, NumChars * 0.5 do
+		local Char = Chars[ i ]
+		local OppositeIndex = NumChars - i + 1
+		Chars[ i ] = Chars[ OppositeIndex ]
+		Chars[ OppositeIndex ] = Char
 	end
 
-	--Table concat saves garbage data from concatenating the string for each character.
-	return TableConcat( NewString, "" )
+	return TableConcat( Chars, "" )
 end
-string.UTF8Reverse = MakeWrapperFunc( UTF8Reverse, string.reverse )
+
+local WhitespaceChars = {
+	-- Control characters (tab, line feed, vertical tab, form feed, carriage return)
+	0x9, 0xA, 0xB, 0xC, 0xD,
+	-- Whitespace characters (all of these are invisible).
+	0x20, 0xA0, 0x180E, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x200B,
+	0x200C, 0x200D, 0x2028, 0x2029, 0x202F, 0x205F, 0x2060, 0x3000, 0xFEFF
+}
+local NumWhitespaceChars = #WhitespaceChars
+for i = 1, NumWhitespaceChars do
+	local Char = UTF8Char( WhitespaceChars[ i ] )
+	WhitespaceChars[ Char ] = true
+	WhitespaceChars[ i ] = Char
+end
+
+--[[
+	Replaces all whitespace characters in the given string with the given replacement value.
+	This includes many more characters than the standard %s pattern.
+
+	Inputs: String, replacement string value (defaults to an ASCII space).
+	Output: The string with all whitespace characters replaced with the given replacement value.
+]]
+function string.NormaliseUTF8Whitespace( String, Replacement )
+	Replacement = Replacement or " "
+
+	local Chars = {}
+	local Count = 0
+
+	for ByteIndex, Char in UTF8Chars( String ) do
+		Count = Count + 1
+		Chars[ Count ] = WhitespaceChars[ Char ] and Replacement or Char
+	end
+
+	return TableConcat( Chars )
+end
+
+--[[
+	Checks the given string to see if any of its UTF8 characters are not a whitespace character.
+	This includes many more characters than the standard %s pattern.
+
+	Input: String to check for non-whitespace characters.
+	Output: True if any of the UTF8 characters in the string are not a whitespace character, false otherwise.
+]]
+function string.ContainsNonUTF8Whitespace( String )
+	for ByteIndex, Char in UTF8Chars( String ) do
+		if not WhitespaceChars[ Char ] then
+			return true
+		end
+	end
+
+	return false
+end
