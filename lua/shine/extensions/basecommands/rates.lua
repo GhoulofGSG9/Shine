@@ -13,8 +13,8 @@ local StockRates = { BWLimit = 50, Interp = 100, MoveRate = 26, SendRate = 20, T
 -- Interp 0 lets the engine size interp from the send and move rates.
 local BetaRates = { BWLimit = 100, Interp = 0, MoveRate = 60, SendRate = 30, TickRate = 60 }
 
--- The stock 344 engine reports 3521. Only beta builds, 4000 and up, carry the server work the higher rates rely on.
-local IsBetaEngine = Shared.GetBuildSystemBuildId() >= 4000
+-- The higher rates rely on beta engine server work.
+local IsBetaEngine = Shared.GetBuildNumber() >= 345
 local DefaultRates = IsBetaEngine and BetaRates or StockRates
 
 local RatesModule = {}
