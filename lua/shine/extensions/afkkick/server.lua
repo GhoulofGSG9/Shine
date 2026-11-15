@@ -60,8 +60,8 @@ Plugin.DefaultConfig = {
 	WarnActions = {
 		-- Actions to perform to players when they are warned.
 		-- May be any of: "MOVE_TO_SPECTATE", "MOVE_TO_READY_ROOM", "NOTIFY"
-		[ NO_IMMUNITY ] = {},
-		[ PARTIAL_IMMUNITY ] = {}
+		[ NO_IMMUNITY ] = { "MOVE_TO_SPECTATE" },
+		[ PARTIAL_IMMUNITY ] = { "MOVE_TO_SPECTATE" }
 	},
 	Leniency = {
 		-- The leniency of the AFK tracking can be one of:
