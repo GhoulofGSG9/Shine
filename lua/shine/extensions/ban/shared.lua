@@ -17,9 +17,7 @@ function Plugin:SetupDataTable()
 		BannedBy = "string (32)",
 		BannerID = "integer",
 		Reason = "string (128)",
-		Issued = "integer",
-		Address = "string (64)",
-		HardwareIDs = "string (64)"
+		Issued = "integer"
 	}, "Client" )
 	self:AddNetworkMessage( "RequestBanPage", {
 		Page = "integer",
